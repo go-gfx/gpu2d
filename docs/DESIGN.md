@@ -63,21 +63,34 @@ PixelPainter's floored `a + dst·(255−a)/255` against the GPU's rounding. The
 1-per-channel contract therefore holds for opaque surfaces, which is every
 window; alpha over translucent ground is reported, not gated.
 
+### Metal goes through compute (milestone 3)
+
+go-macos/metal is compute only, and the Metal back-end does not need more:
+the CPU bins instances into 16 × 16 tiles (`List.Bin`), and one thread per
+pixel walks its tile's instances and blends with PixelPainter's integer
+arithmetic. That buys exactness fixed-function blending cannot give (0
+differing channels over a translucent ground too, against up to 4 in alpha
+for WebGPU) at 1.08 ms for a 1080p widget frame and 2.79 ms at 4K, binning
+included. Presenting the frame through a `CAMetalLayer` instead of the CPU
+blit moves to milestone 5 with the window integration.
+
 ## Milestones
 
 1. Instance list and CPU executor: fill, rounded fill, outline, rounded outline,
    translation, clip stack.
 2. WebGPU back-end: WGSL shader, offscreen render and read-back, browser test on
    a real GPU against `Rasterize`.
-3. Metal back-end: go-macos/metal gains textures, a render pipeline, offscreen
-   read-back and `CAMetalLayer` presentation; MSL twin of the WGSL shader.
+3. Metal back-end: a compute kernel over tiles through go-macos/metal as it
+   is (done; see above).
 4. Glyph masks through an atlas (go-gfx/webgpu `atlas.Shelf`), images as
    textures, paths as CPU coverage masks uploaded once.
 5. go-widgets adapter implementing `painter.Painter`; webcanvas and the Cocoa
-   window present through it. Measured against `PixelPainter` at 1×, 2× and 4K:
-   CPU time and wall time per frame.
+   window present through it (the Cocoa window through a `CAMetalLayer`, which
+   needs go-macos/metal to present a drawable). Measured against
+   `PixelPainter` at 1×, 2× and 4K: CPU time and wall time per frame.
 6. A WGSL→MSL emitter in go-gfx/wgsl (its `Info` already carries types, layouts
-   and entry points) retires the hand-written MSL twin.
+   and entry points) retires the second copy of the coverage expression, which
+   today exists in Go, WGSL and MSL, each held to the CPU reference by test.
 
 ## Sources opened
 

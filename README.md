@@ -5,9 +5,10 @@ of **instances**, one per primitive, which a GPU draws as one quad each and whic
 `Rasterize` executes on the CPU. `Rasterize` is the reference: it defines every
 pixel, and each GPU back-end is checked against it.
 
-**Status: milestone 2 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
-list, the CPU reference and the WebGPU back-end (package `webgpu`, browser)
-exist; the Metal back-end does not yet.
+**Status: milestone 3 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
+list, the CPU reference, the WebGPU back-end (package `webgpu`, browser) and
+the Metal back-end (package `metal`, macOS) exist. Text, images and paths, and
+the go-widgets adapter, come next.
 
 ## Measured
 
@@ -15,12 +16,13 @@ The same widget-toolkit-shaped frame (`WidgetFrame`: background, a grid of
 rounded cards with translucent borders, controls and hover washes) on an Apple
 M4 Max, 2026-11-05, 1-minute load about 7 (indicative):
 
-| frame | PixelPainter, native CPU | CPU in wasm | **WebGPU, Chromium on Metal** |
-|---|---:|---:|---:|
-| 1920 × 1080, ~700 instances | 13.1 ms | 99.7 ms | **0.99 ms** |
-| 3840 × 2160, 2201 instances | 52.5 ms | 390 ms | **1.62 ms** |
+| frame | PixelPainter, native CPU | CPU in wasm | **WebGPU, Chromium on Metal** | **Metal compute, native** |
+|---|---:|---:|---:|---:|
+| 1920 × 1080, ~700 instances | 13.1 ms | 99.7 ms | **0.99 ms** | **1.08 ms** |
+| 3840 × 2160, 2201 instances | 52.5 ms | 390 ms | **1.62 ms** | **2.79 ms** |
 
-The GPU column is a whole frame: `Draw` and the wait for the GPU to finish.
+The GPU columns are whole frames: `Draw` and the wait for the GPU to finish,
+binning on the CPU included for Metal.
 Recording the 4K list costs 9.6 µs and no allocation (`BenchmarkRecord`). The
 wasm column is `Rasterize`, the reference, which blends every pixel where
 PixelPainter copies opaque rows, so it is slower than PixelPainter compiled to
@@ -31,7 +33,10 @@ The GPU's pixels: over 200 random scenes (2902 instances) on an opaque ground,
 the colour channels still do; alpha differs by up to 4, because PixelPainter
 computes `a + dst·(255−a)/255` with a floored division and fixed-function
 blending rounds, and the difference grows with stacked translucent paint. A
-window surface is opaque, so the case does not arise there.
+window surface is opaque, so the case does not arise there. The Metal back-end
+blends in integers like PixelPainter and equals `Rasterize` on **every channel
+over either ground** (300 scenes, 4372 instances, 0 of 3,686,400 channels
+differ on each).
 
 ```go
 l, err := gpu2d.NewList(960, 600)
@@ -77,6 +82,22 @@ One quad per instance from the instance index, no vertex buffer; `Shader` is
 the WGSL, validated on every platform by go-gfx/wgsl before a browser sees it.
 `TestMatchesReference` runs in a real Chromium worker: on a GPU on macOS in CI,
 on SwiftShader on Linux.
+
+## Metal (package `metal`, macOS)
+
+```go
+r, err := gpu2dmetal.New(w, h) // go-macos/metal's ErrUnsupported off macOS
+copy(r.Pixels(), ground)       // on unified memory, the bytes the GPU draws into
+err = r.Draw(list)             // bins, dispatches, waits
+frame := r.Pixels()
+```
+
+A compute kernel through go-macos/metal (pure Go, no cgo): `List.Bin` sorts
+the instances into 16 × 16 tiles on the CPU, then one GPU thread per pixel
+walks its tile's instances in order, computes `Coverage` (with
+`precise::sqrt`, so Metal's fast math cannot change it) and blends with
+PixelPainter's integer arithmetic. Binning is bounded (`MaxBinned`) and
+refused before anything is allocated.
 
 ## Bounds
 
