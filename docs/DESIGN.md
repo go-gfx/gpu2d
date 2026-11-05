@@ -54,6 +54,15 @@ the reference's.
   arithmetic instead of `(src·a + dst·(255−a) + 127) / 255`. The tests report
   the maximum difference and how many channels differ, and fail above 1.
 
+### Measured against the contract (milestone 2)
+
+WebGPU in Chromium on an Apple M4 Max (Metal), 200 random scenes, 2902
+instances: over an opaque ground every channel equals `Rasterize`; over a
+translucent ground the colour channels do and alpha differs by up to 4, from
+PixelPainter's floored `a + dst·(255−a)/255` against the GPU's rounding. The
+1-per-channel contract therefore holds for opaque surfaces, which is every
+window; alpha over translucent ground is reported, not gated.
+
 ## Milestones
 
 1. Instance list and CPU executor: fill, rounded fill, outline, rounded outline,
