@@ -99,8 +99,10 @@ CPU work between frames is a 1.5 ms spin, the size of the gallery's recording:
 | 0 | 1.31 ms | 1.33 ms |
 | 1.5 ms | 3.17 ms | 1.78 ms |
 
-Each costs 129 allocations (5.4 KB) per frame, all inside go-macos/objc's
-message sends.
+Each frame cost 132 allocations, nearly all inside go-macos/objc's
+reflective message sends. With go-macos/metal v0.5.0, which sends per-frame
+messages through objc's `Msg0`–`Msg3`, it costs 30 (`BenchmarkOverlap`,
+2026-11-05).
 
 List, Bin and AppendBytes were checked for per-frame allocation: with reused
 slices they allocate nothing (`TestSteadyFrameAllocatesNothing`).
