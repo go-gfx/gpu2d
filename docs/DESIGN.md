@@ -89,6 +89,19 @@ queue run in order, so two frames in flight composite in submission order.
 error, not a hang: a third `Submit` is `ErrBusy`, `Wait` with nothing in
 flight is `ErrNothingInFlight`, and `Close` drains first.
 
+Measured with `BenchmarkOverlap` (960 × 2834 widget frame, M4 Max, 10 rounds
+interleaved, benchstat medians, 1-minute load 8.0 to 8.2, a little above the
+usual bound of 8, so times are indicative; allocation counts are exact). The
+CPU work between frames is a 1.5 ms spin, the size of the gallery's recording:
+
+| CPU work per frame | `Draw` | `Submit` / `Wait` |
+|---|---:|---:|
+| 0 | 1.31 ms | 1.33 ms |
+| 1.5 ms | 3.17 ms | 1.78 ms |
+
+Each costs 129 allocations (5.4 KB) per frame, all inside go-macos/objc's
+message sends.
+
 List, Bin and AppendBytes were checked for per-frame allocation: with reused
 slices they allocate nothing (`TestSteadyFrameAllocatesNothing`).
 

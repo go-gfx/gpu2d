@@ -6,7 +6,9 @@ package metal
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/go-gfx/gpu2d"
 	"github.com/go-gfx/gpu2d/internal/scenes"
@@ -247,36 +249,47 @@ func TestSubmitRefusesAWrongSizeAndATooLargeList(t *testing.T) {
 
 // BenchmarkOverlap is the point of Submit: per frame the CPU records the next
 // list while the GPU draws the last. "draw" is the synchronous baseline,
-// "overlap" waits for the previous frame only after recording the next.
+// "overlap" records the next frame between Submit and Wait. The CPU work is
+// modelled as a spin of cpuMs (0 and 1.5 ms: the gallery's recording through
+// gpupainter is about 1.7 ms), so the table does not depend on how fast the
+// recorder is. Draw costs cpu + GPU; Submit/Wait costs about max(cpu, GPU)
+// plus the binning and packing.
 func BenchmarkOverlap(b *testing.B) {
 	const w, h = 960, 2834
-	for _, mode := range []string{"draw", "overlap"} {
-		b.Run(mode, func(b *testing.B) {
-			r := renderer(b, w, h)
-			l, _ := gpu2d.NewList(w, h)
-			b.ReportAllocs()
-			for b.Loop() {
-				l.Reset()
+	for _, cpu := range []time.Duration{0, 1500 * time.Microsecond} {
+		for _, overlap := range []bool{false, true} {
+			name := "draw"
+			if overlap {
+				name = "overlap"
+			}
+			b.Run(fmt.Sprintf("cpu%dus/%s", cpu.Microseconds(), name), func(b *testing.B) {
+				r := renderer(b, w, h)
+				l, _ := gpu2d.NewList(w, h)
 				gpu2d.WidgetFrame(l)
-				if mode == "draw" {
-					if err := r.Draw(l); err != nil {
+				b.ReportAllocs()
+				for b.Loop() {
+					if !overlap {
+						spin(cpu)
+						if err := r.Draw(l); err != nil {
+							b.Fatal(err)
+						}
+						continue
+					}
+					if err := r.Submit(l); err != nil {
 						b.Fatal(err)
 					}
-					continue
-				}
-				// The frame above was recorded while the GPU drew the last one.
-				if r.InFlight() > 0 {
+					spin(cpu) // the next frame, recorded while the GPU draws
 					if err := r.Wait(); err != nil {
 						b.Fatal(err)
 					}
 				}
-				if err := r.Submit(l); err != nil {
-					b.Fatal(err)
-				}
-			}
-			if err := r.Wait(); err != nil {
-				b.Fatal(err)
-			}
-		})
+			})
+		}
+	}
+}
+
+// spin keeps one core busy for d.
+func spin(d time.Duration) {
+	for t := time.Now(); time.Since(t) < d; {
 	}
 }
