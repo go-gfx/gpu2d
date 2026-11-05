@@ -5,8 +5,33 @@ of **instances**, one per primitive, which a GPU draws as one quad each and whic
 `Rasterize` executes on the CPU. `Rasterize` is the reference: it defines every
 pixel, and each GPU back-end is checked against it.
 
-**Status: milestone 1 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
-list and the CPU reference exist; the WebGPU and Metal back-ends do not yet.
+**Status: milestone 2 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
+list, the CPU reference and the WebGPU back-end (package `webgpu`, browser)
+exist; the Metal back-end does not yet.
+
+## Measured
+
+The same widget-toolkit-shaped frame (`WidgetFrame`: background, a grid of
+rounded cards with translucent borders, controls and hover washes) on an Apple
+M4 Max, 2026-11-05, 1-minute load about 7 (indicative):
+
+| frame | PixelPainter, native CPU | CPU in wasm | **WebGPU, Chromium on Metal** |
+|---|---:|---:|---:|
+| 1920 × 1080, ~700 instances | 13.1 ms | 99.7 ms | **0.99 ms** |
+| 3840 × 2160, 2201 instances | 52.5 ms | 390 ms | **1.62 ms** |
+
+The GPU column is a whole frame: `Draw` and the wait for the GPU to finish.
+Recording the 4K list costs 9.6 µs and no allocation (`BenchmarkRecord`). The
+wasm column is `Rasterize`, the reference, which blends every pixel where
+PixelPainter copies opaque rows, so it is slower than PixelPainter compiled to
+wasm would be.
+
+The GPU's pixels: over 200 random scenes (2902 instances) on an opaque ground,
+**every channel of every pixel equals `Rasterize`**. Over a translucent ground
+the colour channels still do; alpha differs by up to 4, because PixelPainter
+computes `a + dst·(255−a)/255` with a floored division and fixed-function
+blending rounds, and the difference grows with stacked translucent paint. A
+window surface is opaque, so the case does not arise there.
 
 ```go
 l, err := gpu2d.NewList(960, 600)
@@ -39,6 +64,19 @@ shader computing `Coverage` at the pixel centre and fixed-function blending
 (`src-alpha`, `one-minus-src-alpha`). It must match `Rasterize` within **1 per
 channel**: the coverage is the same expression in float32, the blend is unorm
 arithmetic instead of `(src·a + dst·(255−a) + 127) / 255`.
+
+## WebGPU (package `webgpu`, GOOS=js)
+
+```go
+webgpu.InstallReplay(ctx, "")             // go-gfx/webgpu's one-call submit; your URL under a strict CSP
+r, err := gpu2dwebgpu.New(ctx, device, w, h)
+err = r.Draw(list, nil)                   // one submit; Texture() is the rgba8unorm target
+```
+
+One quad per instance from the instance index, no vertex buffer; `Shader` is
+the WGSL, validated on every platform by go-gfx/wgsl before a browser sees it.
+`TestMatchesReference` runs in a real Chromium worker: on a GPU on macOS in CI,
+on SwiftShader on Linux.
 
 ## Bounds
 

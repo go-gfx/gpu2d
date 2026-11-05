@@ -22,6 +22,9 @@ jobs:
           go-version-file: go.mod
       - name: vet
         run: go vet ./...
+      - name: vet (js/wasm)
+        shell: bash
+        run: GOOS=js GOARCH=wasm go vet ./...
       - name: test
         run: go test -race -count=1 ./...
       - name: coverage gate (100%)
@@ -54,6 +57,65 @@ jobs:
           go-version-file: go.mod
       - name: fuzz FuzzList
         run: go test -run '^$' -fuzz FuzzList -fuzztime 60s .
+
+  # The WebGPU back-end in a real Chromium worker, with go-gfx/webgpu's own
+  # go test -exec runner built from its tagged source. macOS must get a GPU
+  # adapter (WEBGPU_REQUIRE_GPU); Linux runs on SwiftShader, which proves the
+  # pipeline and the shader, not a GPU. Flags and runner image as in
+  # go-gfx/webgpu's CI.
+  browser:
+    name: browser (${{ matrix.lane }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { lane: 'macOS, GPU required', os: macos-latest, require: '1', fallback: '0', args: '' }
+          - { lane: 'Linux, fallback (SwiftShader)', os: ubuntu-24.04, require: '0', fallback: '1', args: '--enable-unsafe-webgpu --enable-features=Vulkan --use-vulkan=swiftshader --use-angle=swiftshader' }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          repository: go-gfx/webgpu
+          ref: v0.15.0
+          path: webgpu-src
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v5
+        with: { node-version: 22 }
+      - name: Playwright driver and Chromium
+        shell: bash
+        run: |
+          echo "PLAYWRIGHT_DRIVER_PATH=$RUNNER_TEMP/pwdriver" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_NODEJS_PATH=$(command -v node)" >> "$GITHUB_ENV"
+          go run github.com/go-wasmcontainers/playground/cmd/site@v0.2.0 playwright-driver --dir "$RUNNER_TEMP/pwdriver"
+          PLAYWRIGHT_DRIVER_PATH="$RUNNER_TEMP/pwdriver" PLAYWRIGHT_NODEJS_PATH="$(command -v node)" \
+            go -C webgpu-src/internal/cmd/wasmbrowser run github.com/playwright-community/playwright-go/cmd/playwright install --with-deps chromium
+      - name: build the runner
+        run: go -C webgpu-src/internal/cmd/wasmbrowser build -o "$RUNNER_TEMP/wasmbrowser" .
+      - name: GOOS=js go test in a browser worker
+        shell: bash
+        env:
+          WEBGPU_REQUIRE_GPU: ${{ matrix.require }}
+          WEBGPU_ALLOW_FALLBACK: ${{ matrix.fallback }}
+          WEBGPU_BROWSER_ARGS: ${{ matrix.args }}
+        run: |
+          status=0
+          GOOS=js GOARCH=wasm go test -count=1 -v -exec="$RUNNER_TEMP/wasmbrowser" ./webgpu/ > "$RUNNER_TEMP/browser.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/browser.log"
+          exit $status
+      # Once each, so they keep working; shared runners' timings are not results.
+      - name: benchmarks run (once each)
+        shell: bash
+        env:
+          WEBGPU_BROWSER_ARGS: ${{ matrix.args }}
+        run: |
+          status=0
+          GOOS=js GOARCH=wasm go test -count=1 -run '^$' -bench . -benchtime 1x -exec="$RUNNER_TEMP/wasmbrowser" ./webgpu/ > "$RUNNER_TEMP/bench.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/bench.log"
+          exit $status
 
   govulncheck:
     runs-on: ubuntu-latest
