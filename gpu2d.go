@@ -8,7 +8,10 @@
 // back-end must match it within 1 per channel (see docs/DESIGN.md).
 package gpu2d
 
-import "errors"
+import (
+	"errors"
+	"slices"
+)
 
 // Rect is an integer rectangle; the right and bottom edges are exclusive.
 type Rect struct{ X, Y, W, H int }
@@ -24,23 +27,53 @@ const (
 	KindFill Kind = iota
 	// KindOutline covers the one-pixel outline, its corners rounded to Radius.
 	KindOutline
+	// KindMask paints Color through 8-bit coverage in the data arena, one
+	// byte per pixel of the rectangle, Stride bytes per row: PixelPainter's
+	// DrawMask.
+	KindMask
+	// KindAlpha paints Color's RGB at the alpha the data arena gives for each
+	// pixel, laid out as for KindMask: a path's coverage already scaled by
+	// its colour's alpha and rounded, as PixelPainter composites it.
+	KindAlpha
+	// KindImage draws the SrcW × SrcH RGBA image at Data, scaled into the
+	// rectangle by nearest neighbour: PixelPainter's DrawImage.
+	KindImage
 )
 
-// Instance is one primitive as a GPU reads it: 48 bytes, every field 32 bits.
+// Instance is one primitive as a GPU reads it: 64 bytes, every field 32 bits.
 // X..H are in surface pixels, translation applied. Clip is the half-open box
 // [ClipX0, ClipX1) × [ClipY0, ClipY1) the primitive may touch. Radius is
-// already clamped to half the smaller side.
+// already clamped to half the smaller side. Data is a byte offset into the
+// list's data arena (a multiple of 4), for the kinds that read one.
 type Instance struct {
 	X, Y, W, H                     int32
 	ClipX0, ClipY0, ClipX1, ClipY1 int32
 	Color                          uint32 // R | G<<8 | B<<16 | A<<24
 	Radius                         int32
 	Kind                           Kind
+	Data, Stride, SrcW, SrcH       uint32
 	_                              uint32
 }
 
 // InstanceSize is the byte size of one Instance.
-const InstanceSize = 48
+const InstanceSize = 64
+
+// MaxData bounds the list's data arena, which holds the masks and images of
+// a frame: 2^28 bytes is 256 MiB, eight full 4K RGBA images. A primitive that
+// would pass it is refused and the list's Err reports ErrTooLarge.
+const MaxData = 1 << 28
+
+// maxData is MaxData, lowered by tests to reach the refusal without
+// allocating a quarter of a gigabyte.
+var maxData int64 = MaxData
+
+// MaxScaled bounds an image's scaling products W·SrcW and H·SrcH, which a
+// GPU computes in 32-bit integers for the nearest-neighbour mapping. An
+// image past it is refused and Err reports ErrImageScale.
+const MaxScaled = 1 << 31
+
+// ErrImageScale reports an image whose scaling products pass MaxScaled.
+var ErrImageScale = errors.New("gpu2d: image size times its destination size passes MaxScaled")
 
 // MaxCoord bounds every coordinate a list records, translation included:
 // 2^24 is the last integer up to which float32, which a shader computes in,
@@ -63,6 +96,8 @@ type List struct {
 	instances []Instance
 	clips     []Rect
 	offsets   [][2]int
+	data      []byte
+	err       error
 }
 
 // NewList starts a frame for a w × h surface. A side below zero or above
@@ -82,10 +117,158 @@ func (l *List) Reset() {
 	l.instances = l.instances[:0]
 	l.clips = l.clips[:0]
 	l.offsets = l.offsets[:0]
+	l.data = l.data[:0]
+	l.err = nil
 }
 
 // Instances returns the recorded instances in draw order.
 func (l *List) Instances() []Instance { return l.instances }
+
+// Data returns the arena the mask, alpha and image instances read from.
+func (l *List) Data() []byte { return l.data }
+
+// Err reports the first primitive the list refused since NewList or Reset
+// (ErrTooLarge, ErrImageScale); the primitives after it are still recorded.
+func (l *List) Err() error { return l.err }
+
+func (l *List) refuse(err error) {
+	if l.err == nil {
+		l.err = err
+	}
+}
+
+// reserve appends n bytes to the arena, starting on a 4-byte boundary, and
+// returns their offset; false when the arena would pass MaxData.
+func (l *List) reserve(n int) (int, bool) {
+	off := (len(l.data) + 3) &^ 3
+	if int64(off)+int64(n) > maxData {
+		l.refuse(ErrTooLarge)
+		return 0, false
+	}
+	l.data = slices.Grow(l.data, off+n-len(l.data))
+	start := len(l.data)
+	l.data = l.data[:off+n]
+	clear(l.data[start:])
+	return off, true
+}
+
+// visible returns r shifted by dx, dy, the clip in force (inside the
+// surface) and their intersection; ok is false when nothing is left, or when
+// r reaches past MaxCoord.
+func (l *List) visible(r Rect, dx, dy int) (rt, clip, eff Rect, ok bool) {
+	x0, x1 := span(r.X, r.W, dx)
+	y0, y1 := span(r.Y, r.H, dy)
+	if x0 < -MaxCoord || y0 < -MaxCoord || x1 > MaxCoord || y1 > MaxCoord {
+		return rt, clip, eff, false
+	}
+	rt = Rect{X: int(x0), Y: int(y0), W: r.W, H: r.H}
+	clip = Rect{W: l.w, H: l.h}
+	if n := len(l.clips); n > 0 {
+		clip = intersect(clip, l.clips[n-1])
+	}
+	eff = intersect(rt, clip)
+	return rt, clip, eff, eff.W > 0
+}
+
+func (l *List) push(r, clip Rect, c RGBA, k Kind, radius, data, stride, srcW, srcH int) {
+	l.instances = append(l.instances, Instance{
+		X: int32(r.X), Y: int32(r.Y), W: int32(r.W), H: int32(r.H),
+		ClipX0: int32(clip.X), ClipY0: int32(clip.Y),
+		ClipX1: int32(clip.X + clip.W), ClipY1: int32(clip.Y + clip.H),
+		Color: pack(c), Radius: int32(max(radius, 0)), Kind: k,
+		Data: uint32(data), Stride: uint32(stride), SrcW: uint32(srcW), SrcH: uint32(srcH),
+	})
+}
+
+// DrawMask paints ink through mask, one coverage byte per pixel of dst,
+// stride bytes per row: PixelPainter's DrawMask, short rows included (a row
+// the mask cannot supply across the visible part is left untouched).
+func (l *List) DrawMask(dst Rect, mask []byte, stride int, ink RGBA) {
+	if dst.W <= 0 || dst.H <= 0 || stride <= 0 || ink.A == 0 {
+		return
+	}
+	dx, dy := l.offset()
+	rt, _, eff, ok := l.visible(dst, dx, dy)
+	if !ok {
+		return
+	}
+	off, ok := l.reserve(eff.W * eff.H)
+	if !ok {
+		return
+	}
+	for y := range eff.H {
+		from := int64(eff.Y-rt.Y+y)*int64(stride) + int64(eff.X-rt.X)
+		if from+int64(eff.W) > int64(len(mask)) {
+			continue
+		}
+		copy(l.data[off+y*eff.W:off+(y+1)*eff.W], mask[from:from+int64(eff.W)])
+	}
+	l.push(eff, eff, ink, KindMask, 0, off, eff.W, 0, 0)
+}
+
+// DrawAlpha paints c's RGB at a per-pixel alpha computed from coverage:
+// cov holds w × h values from 0 to 1 for the box at (ox, oy), in surface
+// pixels with no translation, and each pixel's alpha is c.A·cov rounded, as
+// PixelPainter composites a path's coverage. It is what a path rasterizer's
+// output becomes.
+func (l *List) DrawAlpha(cov []float64, ox, oy, w, h int, c RGBA) {
+	if c.A == 0 || w <= 0 || h <= 0 || int64(len(cov)) < int64(w)*int64(h) {
+		return
+	}
+	// The box is already in surface pixels: no translation.
+	_, _, eff, ok := l.visible(Rect{X: ox, Y: oy, W: w, H: h}, 0, 0)
+	if !ok {
+		return
+	}
+	off, ok := l.reserve(eff.W * eff.H)
+	if !ok {
+		return
+	}
+	for y := range eff.H {
+		row := cov[(eff.Y-oy+y)*w:]
+		for x := range eff.W {
+			a := min(row[eff.X-ox+x], 1)
+			if a > 0 {
+				l.data[off+y*eff.W+x] = uint8(float64(c.A)*a + 0.5)
+			}
+		}
+	}
+	l.push(eff, eff, c, KindAlpha, 0, off, eff.W, 0, 0)
+}
+
+// DrawImage draws src, srcW × srcH RGBA pixels, scaled into dst by nearest
+// neighbour: PixelPainter's DrawImage. A src shorter than srcW·srcH·4 is
+// ignored, as PixelPainter ignores it.
+func (l *List) DrawImage(dst Rect, src []byte, srcW, srcH int) {
+	if srcW <= 0 || srcH <= 0 || dst.W <= 0 || dst.H <= 0 {
+		return
+	}
+	// The size is judged before the bytes are looked at, so an image too big
+	// to record is refused whatever the caller passed.
+	n := int64(srcW) * int64(srcH) * 4
+	if n > maxData {
+		l.refuse(ErrTooLarge)
+		return
+	}
+	if int64(dst.W)*int64(srcW) >= MaxScaled || int64(dst.H)*int64(srcH) >= MaxScaled {
+		l.refuse(ErrImageScale)
+		return
+	}
+	if int64(len(src)) < n {
+		return
+	}
+	dx, dy := l.offset()
+	rt, clip, _, ok := l.visible(dst, dx, dy)
+	if !ok {
+		return
+	}
+	off, ok := l.reserve(int(n))
+	if !ok {
+		return
+	}
+	copy(l.data[off:], src[:n])
+	l.push(rt, clip, RGBA{}, KindImage, 0, off, 0, srcW, srcH)
+}
 
 // Size returns the surface size.
 func (l *List) Size() (w, h int) { return l.w, l.h }
@@ -161,25 +344,11 @@ func (l *List) add(r Rect, radius int, c RGBA, k Kind) {
 		return
 	}
 	dx, dy := l.offset()
-	x0, x1 := span(r.X, r.W, dx)
-	y0, y1 := span(r.Y, r.H, dy)
-	if x0 < -MaxCoord || y0 < -MaxCoord || x1 > MaxCoord || y1 > MaxCoord {
+	rt, clip, _, ok := l.visible(r, dx, dy)
+	if !ok {
 		return
 	}
-	r = Rect{X: int(x0), Y: int(y0), W: r.W, H: r.H}
-	clip := Rect{W: l.w, H: l.h}
-	if n := len(l.clips); n > 0 {
-		clip = intersect(clip, l.clips[n-1])
-	}
-	if intersect(r, clip).W == 0 {
-		return
-	}
-	l.instances = append(l.instances, Instance{
-		X: int32(r.X), Y: int32(r.Y), W: int32(r.W), H: int32(r.H),
-		ClipX0: int32(clip.X), ClipY0: int32(clip.Y),
-		ClipX1: int32(clip.X + clip.W), ClipY1: int32(clip.Y + clip.H),
-		Color: pack(c), Radius: int32(max(radius, 0)), Kind: k,
-	})
+	l.push(rt, clip, c, k, radius, 0, 0, 0, 0)
 }
 
 // clampRadius caps radius at half the smaller side of r, as PixelPainter does.

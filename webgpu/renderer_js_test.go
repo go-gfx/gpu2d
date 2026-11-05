@@ -8,12 +8,12 @@ package webgpu
 
 import (
 	"context"
-	"math/rand/v2"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/go-gfx/gpu2d"
+	"github.com/go-gfx/gpu2d/internal/scenes"
 	wg "github.com/go-gfx/webgpu"
 )
 
@@ -43,44 +43,6 @@ func device(t *testing.T) (*wg.Device, context.Context) {
 		t.Fatal(err)
 	}
 	return d, ctx
-}
-
-// scene records n random primitives: the same mix as internal/parity.
-func scene(l *gpu2d.List, seed uint64, n, w, h int) {
-	r := rand.New(rand.NewPCG(seed, 0x9e3779b97f4a7c15))
-	coord := func(m int) int { return r.IntN(m+16) - 8 }
-	size := func() int { return r.IntN(24) }
-	col := func() gpu2d.RGBA {
-		a := uint8(255)
-		if r.IntN(2) == 0 {
-			a = uint8(r.IntN(256))
-		}
-		return gpu2d.RGBA{R: uint8(r.IntN(256)), G: uint8(r.IntN(256)), B: uint8(r.IntN(256)), A: a}
-	}
-	rect := func() gpu2d.Rect { return gpu2d.Rect{X: coord(w), Y: coord(h), W: size(), H: size()} }
-	for range n {
-		switch r.IntN(12) {
-		case 0, 1, 2:
-			l.FillRect(rect(), col())
-		case 3, 4:
-			l.FillRoundRect(rect(), r.IntN(16)-2, col())
-		case 5:
-			l.StrokeRect(rect(), col(), r.IntN(6))
-		case 6, 7:
-			l.StrokeRoundRect(rect(), r.IntN(16)-2, col(), r.IntN(6))
-		case 8:
-			c := rect()
-			c.W += 16
-			c.H += 16
-			l.PushClip(c)
-		case 9:
-			l.PushTranslate(r.IntN(9)-4, r.IntN(9)-4)
-		case 10:
-			l.PopClip()
-		default:
-			l.PopTranslate()
-		}
-	}
 }
 
 // TestMatchesReference renders random scenes on the GPU and on the CPU from
@@ -121,7 +83,7 @@ func compare(t *testing.T, ctx context.Context, r *Renderer, ground []byte, seed
 	var channels, drawn int
 	for seed := range uint64(seeds) {
 		l, _ := gpu2d.NewList(w, h)
-		scene(l, seed, 40, w, h)
+		scenes.Random(l, seed, 40)
 		drawn += len(l.Instances())
 		want := append([]byte(nil), ground...)
 		if err := l.Rasterize(want); err != nil {

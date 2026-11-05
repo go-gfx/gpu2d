@@ -66,7 +66,8 @@ func TestInstanceSize(t *testing.T) {
 }
 
 func TestAppendBytes(t *testing.T) {
-	ins := []Instance{{X: -1, Y: 2, W: 3, H: 4, ClipX0: 5, ClipY0: 6, ClipX1: 7, ClipY1: 8, Color: 0xAABBCCDD, Radius: 9, Kind: KindOutline}}
+	ins := []Instance{{X: -1, Y: 2, W: 3, H: 4, ClipX0: 5, ClipY0: 6, ClipX1: 7, ClipY1: 8, Color: 0xAABBCCDD, Radius: 9, Kind: KindOutline,
+		Data: 12, Stride: 13, SrcW: 14, SrcH: 15}}
 	b := AppendBytes([]byte{0xEE}, ins)
 	if len(b) != 1+InstanceSize {
 		t.Fatalf("%d bytes", len(b))
@@ -75,7 +76,7 @@ func TestAppendBytes(t *testing.T) {
 	word := func(i int) uint32 {
 		return uint32(b[4*i]) | uint32(b[4*i+1])<<8 | uint32(b[4*i+2])<<16 | uint32(b[4*i+3])<<24
 	}
-	want := [12]uint32{0xFFFFFFFF, 2, 3, 4, 5, 6, 7, 8, 0xAABBCCDD, 9, uint32(KindOutline), 0}
+	want := [16]uint32{0xFFFFFFFF, 2, 3, 4, 5, 6, 7, 8, 0xAABBCCDD, 9, uint32(KindOutline), 12, 13, 14, 15, 0}
 	for i, w := range want {
 		if word(i) != w {
 			t.Fatalf("word %d = %#x, want %#x", i, word(i), w)

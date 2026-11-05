@@ -40,6 +40,7 @@ type Renderer struct {
 	w, h              int
 	target            *mtl.Buffer
 	inst, spans, list *mtl.Buffer
+	data              *mtl.Buffer
 	bytes             []byte
 	spanIdx, listIdx  []uint32
 }
@@ -112,6 +113,10 @@ func (r *Renderer) Draw(l *gpu2d.List) error {
 	if r.list, err = r.fit(r.list, 4*len(r.listIdx)); err != nil {
 		return err
 	}
+	if r.data, err = r.fit(r.data, len(l.Data())); err != nil {
+		return err
+	}
+	copy(r.data.Bytes(), l.Data())
 	copy(r.inst.Bytes(), r.bytes)
 	putWords(r.spans.Bytes(), r.spanIdx)
 	putWords(r.list.Bytes(), r.listIdx)
@@ -124,6 +129,7 @@ func (r *Renderer) Draw(l *gpu2d.List) error {
 		e.Buffer(2, r.list)
 		e.Buffer(3, r.target)
 		mtl.Constant(e, 4, &f)
+		e.Buffer(5, r.data)
 		e.Dispatch(r.w, r.h)
 	})
 }
@@ -137,7 +143,7 @@ func putWords(b []byte, ws []uint32) {
 
 // Close releases the GPU objects; the renderer must not be used after.
 func (r *Renderer) Close() {
-	for _, b := range []*mtl.Buffer{r.inst, r.spans, r.list, r.target} {
+	for _, b := range []*mtl.Buffer{r.inst, r.spans, r.list, r.data, r.target} {
 		if b != nil {
 			b.Close()
 		}

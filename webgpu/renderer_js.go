@@ -34,11 +34,14 @@ type Renderer struct {
 	uniform *wg.Buffer
 	inst    *wg.Buffer
 	instCap uint64
+	arena   *wg.Buffer
+	dataCap uint64
 	group   *wg.BindGroup
 	target  *wg.Texture
 	view    *wg.TextureView
 	rec     *wg.Recorder
 	bytes   []byte
+	padded  []byte // the arena, padded to whole words
 }
 
 // New builds the pipeline and a w × h target on d.
@@ -54,6 +57,7 @@ func New(ctx context.Context, d *wg.Device, w, h int) (*Renderer, error) {
 	if r.bgl, err = d.CreateBindGroupLayout(wg.BindGroupLayoutDescriptor{Entries: []wg.BindGroupLayoutEntry{
 		{Binding: 0, Visibility: wg.ShaderStageVertex | wg.ShaderStageFragment, Buffer: &wg.BufferBindingLayout{Type: wg.BufferBindingTypeReadOnlyStorage}},
 		{Binding: 1, Visibility: wg.ShaderStageVertex, Buffer: &wg.BufferBindingLayout{Type: wg.BufferBindingTypeUniform}},
+		{Binding: 2, Visibility: wg.ShaderStageFragment, Buffer: &wg.BufferBindingLayout{Type: wg.BufferBindingTypeReadOnlyStorage}},
 	}}); err != nil {
 		return nil, err
 	}
@@ -94,37 +98,58 @@ func New(ctx context.Context, d *wg.Device, w, h int) (*Renderer, error) {
 	if r.view, err = r.target.CreateView(nil); err != nil {
 		return nil, err
 	}
-	if err = r.grow(64); err != nil {
+	if err = r.grow(64, 4096); err != nil {
 		return nil, err
 	}
 	r.rec = d.NewRecorder()
 	return r, nil
 }
 
-// grow makes the instance buffer hold at least n instances, doubling.
-func (r *Renderer) grow(n int) error {
-	need := uint64(n) * gpu2d.InstanceSize
-	if need <= r.instCap {
+// grow makes the instance buffer hold at least n instances and the arena
+// buffer at least data bytes, each doubling, and rebuilds the bind group
+// when either changed.
+func (r *Renderer) grow(n, data int) error {
+	inst, instCap, err := r.fit(r.inst, r.instCap, uint64(n)*gpu2d.InstanceSize, "gpu2d instances")
+	if err != nil {
+		return err
+	}
+	arena, dataCap, err := r.fit(r.arena, r.dataCap, uint64(data+3)&^3, "gpu2d arena")
+	if err != nil {
+		return err
+	}
+	if inst == r.inst && arena == r.arena {
 		return nil
 	}
-	c := max(r.instCap*2, need)
-	b, err := r.d.CreateBuffer(wg.BufferDescriptor{Label: "gpu2d instances", Size: c, Usage: wg.BufferUsageStorage | wg.BufferUsageCopyDst})
-	if err != nil {
-		return err
-	}
 	g, err := r.d.CreateBindGroup(wg.BindGroupDescriptor{Layout: r.bgl, Entries: []wg.BindGroupEntry{
-		{Binding: 0, Buffer: b},
+		{Binding: 0, Buffer: inst},
 		{Binding: 1, Buffer: r.uniform},
+		{Binding: 2, Buffer: arena},
 	}})
 	if err != nil {
-		b.Destroy()
 		return err
 	}
-	if r.inst != nil {
-		r.inst.Destroy()
+	for _, old := range []struct{ was, now *wg.Buffer }{{r.inst, inst}, {r.arena, arena}} {
+		if old.was != nil && old.was != old.now {
+			old.was.Destroy()
+		}
 	}
-	r.inst, r.instCap, r.group = b, c, g
+	r.inst, r.instCap, r.arena, r.dataCap, r.group = inst, instCap, arena, dataCap, g
 	return nil
+}
+
+// fit returns b when its capacity holds need bytes, else a new storage
+// buffer of at least need (doubling); the caller destroys the old one once
+// the bind group no longer names it.
+func (r *Renderer) fit(b *wg.Buffer, capacity, need uint64, label string) (*wg.Buffer, uint64, error) {
+	if b != nil && need <= capacity {
+		return b, capacity, nil
+	}
+	c := max(capacity*2, need, 4)
+	nb, err := r.d.CreateBuffer(wg.BufferDescriptor{Label: label, Size: c, Usage: wg.BufferUsageStorage | wg.BufferUsageCopyDst})
+	if err != nil {
+		return nil, 0, err
+	}
+	return nb, c, nil
 }
 
 // Texture is the render target, for a caller that presents or samples it.
@@ -138,7 +163,8 @@ func (r *Renderer) Draw(l *gpu2d.List, ground []byte) error {
 		return ErrSize
 	}
 	ins := l.Instances()
-	if err := r.grow(len(ins)); err != nil {
+	data := l.Data()
+	if err := r.grow(len(ins), len(data)); err != nil {
 		return err
 	}
 	r.rec.Reset()
@@ -149,6 +175,12 @@ func (r *Renderer) Draw(l *gpu2d.List, ground []byte) error {
 	if len(ins) > 0 {
 		r.bytes = gpu2d.AppendBytes(r.bytes[:0], ins)
 		r.rec.WriteBuffer(r.inst, 0, r.bytes)
+		if len(data) > 0 {
+			// WriteBuffer wants a multiple of 4 bytes; the arena's last entry
+			// may end short of one.
+			r.padded = append(append(r.padded[:0], data...), make([]byte, (4-len(data)%4)%4)...)
+			r.rec.WriteBuffer(r.arena, 0, r.padded)
+		}
 		p := r.rec.BeginRenderPass(wg.RenderPassDescriptor{ColorAttachments: []*wg.RenderPassColorAttachment{
 			{View: r.view, LoadOp: wg.LoadOpLoad, StoreOp: wg.StoreOpStore},
 		}})

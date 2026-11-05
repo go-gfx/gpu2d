@@ -5,11 +5,19 @@
 struct Inst {
   x: i32, y: i32, w: i32, h: i32,
   cx0: i32, cy0: i32, cx1: i32, cy1: i32,
-  color: u32, radius: i32, kind: u32, pad: u32,
+  color: u32, radius: i32, kind: u32,
+  data: u32, stride: u32, srcW: u32, srcH: u32,
+  pad: u32,
 }
 
 @group(0) @binding(0) var<storage, read> insts: array<Inst>;
 @group(0) @binding(1) var<uniform> surface: vec4f; // width, height
+@group(0) @binding(2) var<storage, read> arena: array<u32>; // masks and images
+
+// byteAt reads byte i of the arena (little-endian words).
+fn byteAt(i: u32) -> u32 {
+  return (arena[i >> 2u] >> ((i & 3u) * 8u)) & 255u;
+}
 
 struct VOut {
   @builtin(position) pos: vec4f,
@@ -66,11 +74,31 @@ fn coverage(x: i32, y: i32, s: Inst) -> f32 {
   let s = insts[v.inst];
   let x = i32(floor(v.pos.x));
   let y = i32(floor(v.pos.y));
+  let c = s.color;
+  let rgb = vec3f(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u));
+  if (s.kind == 2u || s.kind == 3u) {
+    // A mask's coverage (scaled by a translucent ink with a floored
+    // product), or a path's stored alpha.
+    var m = byteAt(s.data + u32(y - s.y) * s.stride + u32(x - s.x));
+    if (m == 0u) { discard; }
+    let ink = c >> 24u;
+    if (s.kind == 2u && ink != 255u) { m = m * ink / 255u; }
+    if (m == 0u) { discard; }
+    return vec4f(rgb, f32(m)) / 255.0;
+  }
+  if (s.kind == 4u) {
+    // Nearest neighbour, PixelPainter's integer mapping.
+    let sx = u32(x - s.x) * s.srcW / u32(s.w);
+    let sy = u32(y - s.y) * s.srcH / u32(s.h);
+    let o = s.data + (sy * s.srcW + sx) * 4u;
+    let t = vec4f(f32(byteAt(o)), f32(byteAt(o + 1u)), f32(byteAt(o + 2u)), f32(byteAt(o + 3u)));
+    if (t.a == 0.0) { discard; }
+    return t / 255.0;
+  }
   let cov = coverage(x, y, s);
   if (cov <= 0.0) { discard; }
   var a = s.color >> 24u;
   if (cov < 1.0) { a = u32(f32(a) * cov + 0.5); }
   if (a == 0u) { discard; }
-  let c = s.color;
-  return vec4f(f32(c & 255u), f32((c >> 8u) & 255u), f32((c >> 16u) & 255u), f32(a)) / 255.0;
+  return vec4f(rgb, f32(a)) / 255.0;
 }

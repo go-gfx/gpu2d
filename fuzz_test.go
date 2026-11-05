@@ -27,11 +27,35 @@ func FuzzList(f *testing.F) {
 			data = data[4:]
 			return int(v)
 		}
+		take := func(n int) []byte {
+			n = min(max(n, 0), len(data))
+			b := data[:n]
+			data = data[n:]
+			return b
+		}
 		for len(data) > 0 {
-			op := data[0] % 8
+			op := data[0] % 11
 			data = data[1:]
 			r := Rect{next(), next(), next(), next()}
 			c := RGBA{uint8(r.X), uint8(r.Y), uint8(r.W), uint8(next())}
+			switch op {
+			case 8:
+				stride := next() % 64
+				l.DrawMask(r, take(next()%256), stride, c)
+				continue
+			case 9:
+				sw, sh := next()%16, next()%16
+				l.DrawImage(r, take(next()%1024), sw, sh)
+				continue
+			case 10:
+				raw := take(next() % 256)
+				cov := make([]float64, len(raw))
+				for i, b := range raw {
+					cov[i] = float64(b)/128 - 0.25 // below 0 and above 1 too
+				}
+				l.DrawAlpha(cov, r.X, r.Y, r.W%32, r.H%32, c)
+				continue
+			}
 			switch op {
 			case 0:
 				l.FillRect(r, c)
@@ -57,6 +81,16 @@ func FuzzList(f *testing.F) {
 			}
 			if in.ClipX0 < 0 || in.ClipY0 < 0 || in.ClipX1 > w || in.ClipY1 > h {
 				t.Fatalf("clip outside the surface: %+v", in)
+			}
+			var need int64
+			switch in.Kind {
+			case KindMask, KindAlpha:
+				need = int64(in.Data) + int64(in.Stride)*int64(in.H)
+			case KindImage:
+				need = int64(in.Data) + 4*int64(in.SrcW)*int64(in.SrcH)
+			}
+			if need > int64(len(l.Data())) {
+				t.Fatalf("instance reads %d bytes of a %d-byte arena: %+v", need, len(l.Data()), in)
 			}
 		}
 		buf := make([]byte, 4*w*h+guard)

@@ -74,6 +74,30 @@ for WebGPU) at 1.08 ms for a 1080p widget frame and 2.79 ms at 4K, binning
 included. Presenting the frame through a `CAMetalLayer` instead of the CPU
 blit moves to milestone 5 with the window integration.
 
+### Masks, images and paths (milestone 4)
+
+Everything PixelPainter draws beyond rectangles carries data, so masks and
+images live in a per-frame **data arena** next to the instances, and the
+instance grew to 64 bytes (`Data`, `Stride`, `SrcW`, `SrcH`):
+
+- `KindMask` is `DrawMask`. Coverage is scaled by a translucent ink with a
+  floored product, and a row the caller's mask cannot supply stays untouched.
+- `KindAlpha` carries a path's coverage already turned into alpha
+  (`uint8(A·cov + 0.5)`), because PixelPainter rounds that differently from a
+  mask.
+- `KindImage` is `DrawImage`, with the same integer nearest-neighbour mapping.
+
+The parity test drives paths through the same go-gfx/gfx/vector rasterizer
+PixelPainter calls. Metal stays byte-identical on both grounds; WebGPU stays
+identical over an opaque ground (alpha up to 3 apart over a translucent one).
+
+A defect found on the way: **PixelPainter ignores the translation for paths.**
+Under `PushTranslate(20, 0)` a rectangle moves and a path does not, so a
+chart inside a scrolled view is drawn where it would be unscrolled.
+`DrawAlpha` takes coverage in surface pixels, which keeps today's parity
+exact; the fix belongs in go-gfx/gfx/vector (translating a path) and
+go-widgets/painter, and the adapter of milestone 5 applies the translation.
+
 ## Milestones
 
 1. Instance list and CPU executor: fill, rounded fill, outline, rounded outline,
@@ -82,8 +106,9 @@ blit moves to milestone 5 with the window integration.
    a real GPU against `Rasterize`.
 3. Metal back-end: a compute kernel over tiles through go-macos/metal as it
    is (done; see above).
-4. Glyph masks through an atlas (go-gfx/webgpu `atlas.Shelf`), images as
-   textures, paths as CPU coverage masks uploaded once.
+4. Glyph masks, images and paths through a per-frame data arena (done; see
+   above). Keeping glyphs and images resident across frames, so that the
+   arena carries only what changed, is a later optimisation.
 5. go-widgets adapter implementing `painter.Painter`; webcanvas and the Cocoa
    window present through it (the Cocoa window through a `CAMetalLayer`, which
    needs go-macos/metal to present a drawable). Measured against

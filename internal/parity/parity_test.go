@@ -12,6 +12,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
+	"github.com/go-gfx/gfx/vector"
 	"github.com/go-gfx/gpu2d"
 	"github.com/go-widgets/painter"
 )
@@ -26,9 +27,26 @@ type surface interface {
 	PopClip()
 	PushTranslate(dx, dy int)
 	PopTranslate()
+	DrawMask(x, y, w, h int, mask []byte, stride int, c [4]uint8)
+	DrawImage(x, y, w, h int, src []byte, sw, sh int)
+	FillPath(pth *vector.Path, c [4]uint8, rule vector.FillRule)
+	StrokePath(pth *vector.Path, c [4]uint8, width float64)
 }
 
 type ref struct{ p *painter.PixelPainter }
+
+func (s ref) DrawMask(x, y, w, h int, mask []byte, stride int, c [4]uint8) {
+	s.p.DrawMask(painter.Rect{X: x, Y: y, W: w, H: h}, mask, stride, pc(c))
+}
+func (s ref) DrawImage(x, y, w, h int, src []byte, sw, sh int) {
+	s.p.DrawImage(painter.Rect{X: x, Y: y, W: w, H: h}, src, sw, sh)
+}
+func (s ref) FillPath(pth *vector.Path, c [4]uint8, rule vector.FillRule) {
+	s.p.FillPath(pth, pc(c), rule)
+}
+func (s ref) StrokePath(pth *vector.Path, c [4]uint8, width float64) {
+	s.p.StrokePath(pth, pc(c), width)
+}
 
 func pc(c [4]uint8) painter.RGBA { return painter.RGBA{R: c[0], G: c[1], B: c[2], A: c[3]} }
 func (s ref) FillRect(x, y, w, h int, c [4]uint8) {
@@ -48,7 +66,32 @@ func (s ref) PopClip()                 { s.p.PopClip() }
 func (s ref) PushTranslate(dx, dy int) { s.p.PushTranslate(dx, dy) }
 func (s ref) PopTranslate()            { s.p.PopTranslate() }
 
-type sub struct{ l *gpu2d.List }
+// sub draws through gpu2d. Paths are rasterized by the same go-gfx/gfx/vector
+// rasterizer PixelPainter calls, clamped to the surface, and their coverage
+// handed to DrawAlpha.
+type sub struct {
+	l  *gpu2d.List
+	rz *vector.Rasterizer
+}
+
+func (s sub) DrawMask(x, y, w, h int, mask []byte, stride int, c [4]uint8) {
+	s.l.DrawMask(gpu2d.Rect{X: x, Y: y, W: w, H: h}, mask, stride, gc(c))
+}
+func (s sub) DrawImage(x, y, w, h int, src []byte, sw, sh int) {
+	s.l.DrawImage(gpu2d.Rect{X: x, Y: y, W: w, H: h}, src, sw, sh)
+}
+func (s sub) FillPath(pth *vector.Path, c [4]uint8, rule vector.FillRule) {
+	w, h := s.l.Size()
+	if cov, ox, oy, bw, bh, ok := s.rz.Fill(pth, rule, w, h); ok && c[3] != 0 {
+		s.l.DrawAlpha(cov, ox, oy, bw, bh, gc(c))
+	}
+}
+func (s sub) StrokePath(pth *vector.Path, c [4]uint8, width float64) {
+	w, h := s.l.Size()
+	if cov, ox, oy, bw, bh, ok := s.rz.Stroke(pth, width, w, h); ok && c[3] != 0 {
+		s.l.DrawAlpha(cov, ox, oy, bw, bh, gc(c))
+	}
+}
 
 func gc(c [4]uint8) gpu2d.RGBA { return gpu2d.RGBA{R: c[0], G: c[1], B: c[2], A: c[3]} }
 func (s sub) FillRect(x, y, w, h int, c [4]uint8) {
@@ -82,7 +125,54 @@ func scene(s surface, seed uint64, n, w, h int) {
 		}
 		return [4]uint8{uint8(r.IntN(256)), uint8(r.IntN(256)), uint8(r.IntN(256)), a}
 	}
+	bytesOf := func(n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			switch r.IntN(4) {
+			case 0:
+				b[i] = 0
+			case 1:
+				b[i] = 255
+			default:
+				b[i] = uint8(r.IntN(256))
+			}
+		}
+		return b
+	}
+	pathOf := func() *vector.Path {
+		p := vector.NewPath().MoveTo(float64(coord(w))+r.Float64(), float64(coord(h))+r.Float64())
+		for range 2 + r.IntN(4) {
+			x, y := float64(coord(w))+r.Float64(), float64(coord(h))+r.Float64()
+			if r.IntN(3) == 0 {
+				p.QuadTo(float64(coord(w)), float64(coord(h)), x, y)
+			} else {
+				p.LineTo(x, y)
+			}
+		}
+		if r.IntN(2) == 0 {
+			p.Close()
+		}
+		return p
+	}
 	for range n {
+		switch r.IntN(16) {
+		case 12:
+			mw, mh := size(), size()
+			stride := mw + r.IntN(3)
+			// Sometimes short, so the rows a mask cannot supply are exercised.
+			s.DrawMask(coord(w), coord(h), mw, mh, bytesOf(max(stride*mh-r.IntN(8)*stride/2, 0)), stride, col())
+			continue
+		case 13:
+			sw, sh := 1+r.IntN(12), 1+r.IntN(12)
+			s.DrawImage(coord(w), coord(h), size(), size(), bytesOf(4*sw*sh), sw, sh)
+			continue
+		case 14:
+			s.FillPath(pathOf(), col(), vector.FillRule(r.IntN(2)))
+			continue
+		case 15:
+			s.StrokePath(pathOf(), col(), 0.5+3*r.Float64())
+			continue
+		}
 		switch r.IntN(12) {
 		case 0, 1, 2:
 			s.FillRect(coord(w), coord(h), size(), size(), col())
@@ -108,7 +198,10 @@ func scene(s surface, seed uint64, n, w, h int) {
 
 // drawn counts the instances every render recorded, so a run whose scenes all
 // clipped to nothing cannot pass as parity.
-var drawn int
+var (
+	drawn int
+	kinds = map[gpu2d.Kind]int{}
+)
 
 func render(t *testing.T, seed uint64, n, w, h int) (want, got []byte) {
 	want = make([]byte, 4*w*h)
@@ -123,21 +216,35 @@ func render(t *testing.T, seed uint64, n, w, h int) (want, got []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scene(sub{l}, seed, n, w, h)
+	scene(sub{l, &vector.Rasterizer{}}, seed, n, w, h)
+	if err := l.Err(); err != nil {
+		t.Fatal(err)
+	}
 	if err := l.Rasterize(got); err != nil {
 		t.Fatal(err)
 	}
 	drawn += len(l.Instances())
+	for _, in := range l.Instances() {
+		kinds[in.Kind]++
+	}
 	return want, got
 }
 
 func TestRasterizeIsPixelPainter(t *testing.T) {
 	const w, h, seeds = 48, 40, 3000
 	drawn = 0
+	clear(kinds)
 	defer func() {
-		t.Logf("%d scenes, %d instances drawn", seeds, drawn)
+		t.Logf("%d scenes, %d instances drawn: %d fill, %d outline, %d mask, %d alpha (paths), %d image",
+			seeds, drawn, kinds[gpu2d.KindFill], kinds[gpu2d.KindOutline], kinds[gpu2d.KindMask],
+			kinds[gpu2d.KindAlpha], kinds[gpu2d.KindImage])
 		if drawn < seeds*10 {
 			t.Fatalf("only %d instances over %d scenes: the scenes barely draw", drawn, seeds)
+		}
+		for k := gpu2d.KindFill; k <= gpu2d.KindImage; k++ {
+			if kinds[k] < seeds/2 {
+				t.Fatalf("kind %d drawn only %d times over %d scenes", k, kinds[k], seeds)
+			}
 		}
 	}()
 	for seed := range uint64(seeds) {
