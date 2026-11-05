@@ -142,10 +142,11 @@ go-widgets/painter, and the adapter of milestone 5 applies the translation.
 4. Glyph masks, images and paths through a per-frame data arena (done; see
    above). Keeping glyphs and images resident across frames, so that the
    arena carries only what changed, is a later optimisation.
-5. go-widgets adapter implementing `painter.Painter`; webcanvas and the Cocoa
-   window present through it (the Cocoa window through a `CAMetalLayer`, which
-   needs go-macos/metal to present a drawable). Measured against
-   `PixelPainter` at 1×, 2× and 4K: CPU time and wall time per frame.
+5. go-widgets adapter implementing `painter.Painter` (done: go-widgets/
+   gpupainter). Presentation: go-macos/metal v0.6.0 presents a drawable, and
+   `Renderer.Present` copies the frame into a `CAMetalLayer`'s drawable with a
+   second kernel, so the frame never returns to the CPU (done, v0.4.0). Next:
+   the Cocoa window hosts the layer, and webcanvas a WebGPU canvas.
 6. A WGSL→MSL emitter in go-gfx/wgsl (its `Info` already carries types, layouts
    and entry points) retires the second copy of the coverage expression, which
    today exists in Go, WGSL and MSL, each held to the CPU reference by test.
@@ -156,7 +157,9 @@ go-widgets/painter, and the adapter of milestone 5 applies the translation.
   (`GPUBlendComponent`, `GPUBlendFactor`), `GPUVertexStepMode`,
   `GPUCanvasAlphaMode`.
 - Apple, CAMetalLayer documentation (`nextDrawable`, `pixelFormat`,
-  `drawableSize`, `framebufferOnly`, `maximumDrawableCount`).
+  `drawableSize`, `framebufferOnly`, `maximumDrawableCount`); the macOS SDK's
+  `CAMetalLayer.h` (BGRA8Unorm only, `device` nil by default on macOS) and
+  `MTLCommandBuffer.h` (`presentDrawable:` before `commit`).
 - go-widgets/painter `round.go`, `pixel.go`, `clip.go`, `translate.go`.
 - go-gfx/webgpu README (Recorder, atlas, surfaces), go-macos/metal README
   (compute only), go-gfx/wgsl README (no MSL emitter yet).

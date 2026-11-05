@@ -60,6 +60,7 @@ type Renderer struct {
 	d      *mtl.Device
 	lib    *mtl.Library
 	pipe   *mtl.Pipeline
+	show   *mtl.Pipeline // copies the frame into a drawable
 	w, h   int
 	target *mtl.Buffer
 	slot   [slots]slot
@@ -82,6 +83,10 @@ func New(w, h int) (*Renderer, error) {
 		return nil, err
 	}
 	if r.pipe, err = r.lib.Pipeline("raster"); err != nil {
+		r.Close()
+		return nil, err
+	}
+	if r.show, err = r.lib.Pipeline("present"); err != nil {
 		r.Close()
 		return nil, err
 	}
@@ -138,52 +143,127 @@ func (r *Renderer) Draw(l *gpu2d.List) error {
 // every frame in flight: write the ground before the first Submit, read the
 // result after the last Wait.
 func (r *Renderer) Submit(l *gpu2d.List) error {
-	if r.n == slots {
-		return ErrBusy
+	s, f, err := r.pack(l)
+	if err != nil {
+		return err
 	}
-	if w, h := l.Size(); w != r.w || h != r.h {
+	p, err := r.d.Submit(func(e *mtl.Encoder) { r.raster(e, s, &f) })
+	return r.sent(s, p, err)
+}
+
+// Present is Submit, and then the frame goes on screen: a second kernel
+// copies it into the layer's next drawable, which is shown once the GPU is
+// done. The layer must be the renderer's size (NewLayer makes one; Resize
+// both together). Wait for it as for Submit; Pixels still holds the frame.
+//
+// It waits for a free drawable first. A layer has three, so a caller that
+// presents faster than the display shows them is held back here, up to the
+// one second CoreAnimation allows before it gives up (mtl.ErrNoDrawable).
+func (r *Renderer) Present(l *gpu2d.List, layer *mtl.Layer) error {
+	if w, h := layer.Size(); w != r.w || h != r.h {
 		return ErrSize
 	}
-	s := &r.slot[(r.head+r.n)%slots]
-	var err error
-	if s.spanIdx, s.listIdx, err = l.Bin(s.spanIdx, s.listIdx); err != nil {
+	s, f, err := r.pack(l)
+	if err != nil {
 		return err
 	}
-	s.bytes = gpu2d.AppendBytes(s.bytes[:0], l.Instances())
-	if s.inst, err = r.fit(s.inst, len(s.bytes)); err != nil {
-		return err
-	}
-	if s.spans, err = r.fit(s.spans, 4*len(s.spanIdx)); err != nil {
-		return err
-	}
-	if s.list, err = r.fit(s.list, 4*len(s.listIdx)); err != nil {
-		return err
-	}
-	if s.data, err = r.fit(s.data, len(l.Data())); err != nil {
-		return err
-	}
-	copy(s.data.Bytes(), l.Data())
-	copy(s.inst.Bytes(), s.bytes)
-	putWords(s.spans.Bytes(), s.spanIdx)
-	putWords(s.list.Bytes(), s.listIdx)
-	across, _ := l.Tiles()
-	f := frame{W: uint32(r.w), H: uint32(r.h), Across: uint32(across), Tile: gpu2d.Tile}
-	p, err := r.d.Submit(func(e *mtl.Encoder) {
-		e.Use(r.pipe)
-		e.Buffer(0, s.inst)
-		e.Buffer(1, s.spans)
-		e.Buffer(2, s.list)
+	p, err := r.d.Present(layer, func(e *mtl.Encoder, t *mtl.Texture) {
+		r.raster(e, s, &f)
+		e.Use(r.show)
 		e.Buffer(3, r.target)
 		mtl.Constant(e, 4, &f)
-		e.Buffer(5, s.data)
+		e.Texture(0, t)
 		e.Dispatch(r.w, r.h)
+		if afterPresent != nil {
+			afterPresent(e, t)
+		}
 	})
+	return r.sent(s, p, err)
+}
+
+// afterPresent lets a test read the drawable back in the same submission,
+// the only moment its texture exists.
+var afterPresent func(*mtl.Encoder, *mtl.Texture)
+
+// NewLayer makes a CAMetalLayer of the renderer's size on the renderer's
+// GPU, for a view to host and Present to draw into.
+func (r *Renderer) NewLayer() (*mtl.Layer, error) { return r.d.NewLayer(r.w, r.h) }
+
+// Resize changes the frame to w × h, waiting first for any frame in flight.
+// The frame's content is not kept: write the ground again before drawing.
+func (r *Renderer) Resize(w, h int) error {
+	if w <= 0 || h <= 0 || w > gpu2d.MaxCoord || h > gpu2d.MaxCoord {
+		return gpu2d.ErrSize
+	}
+	for r.n > 0 {
+		_ = r.Wait()
+	}
+	if w == r.w && h == r.h {
+		return nil
+	}
+	t, err := r.d.NewBuffer(4 * w * h)
+	if err != nil {
+		return err
+	}
+	r.target.Close()
+	r.target, r.w, r.h = t, w, h
+	return nil
+}
+
+// raster records the drawing of slot s.
+func (r *Renderer) raster(e *mtl.Encoder, s *slot, f *frame) {
+	e.Use(r.pipe)
+	e.Buffer(0, s.inst)
+	e.Buffer(1, s.spans)
+	e.Buffer(2, s.list)
+	e.Buffer(3, r.target)
+	mtl.Constant(e, 4, f)
+	e.Buffer(5, s.data)
+	e.Dispatch(r.w, r.h)
+}
+
+// sent records a submission in flight.
+func (r *Renderer) sent(s *slot, p *mtl.Pending, err error) error {
 	if err != nil {
 		return err
 	}
 	s.pend = p
 	r.n++
 	return nil
+}
+
+// pack bins the list and copies it into the next free slot.
+func (r *Renderer) pack(l *gpu2d.List) (*slot, frame, error) {
+	if r.n == slots {
+		return nil, frame{}, ErrBusy
+	}
+	if w, h := l.Size(); w != r.w || h != r.h {
+		return nil, frame{}, ErrSize
+	}
+	s := &r.slot[(r.head+r.n)%slots]
+	var err error
+	if s.spanIdx, s.listIdx, err = l.Bin(s.spanIdx, s.listIdx); err != nil {
+		return nil, frame{}, err
+	}
+	s.bytes = gpu2d.AppendBytes(s.bytes[:0], l.Instances())
+	if s.inst, err = r.fit(s.inst, len(s.bytes)); err != nil {
+		return nil, frame{}, err
+	}
+	if s.spans, err = r.fit(s.spans, 4*len(s.spanIdx)); err != nil {
+		return nil, frame{}, err
+	}
+	if s.list, err = r.fit(s.list, 4*len(s.listIdx)); err != nil {
+		return nil, frame{}, err
+	}
+	if s.data, err = r.fit(s.data, len(l.Data())); err != nil {
+		return nil, frame{}, err
+	}
+	copy(s.data.Bytes(), l.Data())
+	copy(s.inst.Bytes(), s.bytes)
+	putWords(s.spans.Bytes(), s.spanIdx)
+	putWords(s.list.Bytes(), s.listIdx)
+	across, _ := l.Tiles()
+	return s, frame{W: uint32(r.w), H: uint32(r.h), Across: uint32(across), Tile: gpu2d.Tile}, nil
 }
 
 // Wait blocks until the oldest frame in flight has finished and returns the
@@ -230,6 +310,9 @@ func (r *Renderer) Close() {
 	}
 	if r.pipe != nil {
 		r.pipe.Close()
+	}
+	if r.show != nil {
+		r.show.Close()
 	}
 	if r.lib != nil {
 		r.lib.Close()

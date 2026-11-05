@@ -122,6 +122,24 @@ and `Close` waits for what is in flight before releasing memory.
 `List`, `Bin` and `AppendBytes` allocate nothing in steady state
 (`TestSteadyFrameAllocatesNothing`).
 
+To put the frame on screen without the CPU touching it, present to a
+CAMetalLayer that a view hosts:
+
+```go
+layer, err := r.NewLayer()    // the renderer's size, on the renderer's GPU
+view.Send(objc.Sel("setLayer:"), objc.ID(layer.ID()))
+err = r.Present(list, layer)  // Submit, then a second kernel copies the frame into the drawable
+err = r.Wait()
+err = r.Resize(w, h)          // on a window resize; then layer.Resize(w, h)
+```
+
+`Present` takes a frame slot like `Submit`. It waits for the layer's next
+drawable (CoreAnimation allows a second), and the drawable is shown once the
+GPU is done. The drawable is BGRA; the copy writes RGBA floats and Metal
+stores them in the layer's order. `TestAPresentedFrameIsTheFrame` reads the
+drawable back on the GPU and finds every byte of `Pixels`, which
+`TestMatchesReference` holds to the CPU reference.
+
 A compute kernel through go-macos/metal (pure Go, no cgo): `List.Bin` sorts
 the instances into 16 × 16 tiles on the CPU, then one GPU thread per pixel
 walks its tile's instances in order, computes `Coverage` (with
