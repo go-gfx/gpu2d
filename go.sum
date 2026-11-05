@@ -1,4 +1,10 @@
+github.com/ebitengine/purego v0.11.1 h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=
+github.com/ebitengine/purego v0.11.1/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
 github.com/go-gfx/webgpu v0.15.0 h1:YqEOflkk9ej8KFYJvO4gMTpw9c9FtqmKLLP5joRDG2Y=
 github.com/go-gfx/webgpu v0.15.0/go.mod h1:doIaanN3TQ5QUSTUXDvSOrUYIdyAAfNmqCSDio2JTuo=
 github.com/go-gfx/wgsl v0.4.0 h1:SJOaSkvTcPvK9wdp3vM8ruXFvtxeFLvYEBLV3ZPm4zA=
 github.com/go-gfx/wgsl v0.4.0/go.mod h1:Fzzw0jXvB+zxCqmTDwvcu3B7PkIVJBcygl2dyDyDAgQ=
+github.com/go-macos/metal v0.3.0 h1:GEEv+ur1d+gzbYB83/1Nn/ET/3o28zDDFk9Eijkz0o8=
+github.com/go-macos/metal v0.3.0/go.mod h1:oKJWRz0uQl/THo2tvPjGnpC+80rr6iT2wD4NOTv5Jwc=
+github.com/go-macos/objc v0.10.2 h1:WX8CsDT6SbDrIT2wHAZEQBhGcpKR750llRS4oAfX9ww=
+github.com/go-macos/objc v0.10.2/go.mod h1:68hzSUlhg5bFbg1kO0z4DM6xOk4B/IofuxdlyhHHtt8=
