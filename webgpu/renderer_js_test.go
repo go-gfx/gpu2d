@@ -208,7 +208,9 @@ func benchDevice(b *testing.B) (*wg.Device, context.Context) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	a, err := nav.RequestAdapter(ctx, nil)
+	// A software adapter is accepted only to be recognised and skipped:
+	// without AllowFallback, RequestAdapter refuses it with an error.
+	a, err := nav.RequestAdapter(ctx, &wg.RequestAdapterOptions{AllowFallback: true})
 	if err != nil {
 		b.Fatal(err)
 	}
