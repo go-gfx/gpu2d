@@ -49,6 +49,9 @@ func BenchmarkRasterize(b *testing.B) {
 // allocations once the storage has grown: Reset, record the widget frame,
 // Bin into reused slices, AppendBytes into a reused buffer.
 func TestSteadyFrameAllocatesNothing(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector allocates")
+	}
 	l := nl(960, 2834)
 	var spans, list []uint32
 	var buf []byte
