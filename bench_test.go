@@ -44,3 +44,39 @@ func BenchmarkRasterize(b *testing.B) {
 		})
 	}
 }
+
+// TestSteadyFrameAllocatesNothing holds the per-frame path to zero
+// allocations once the storage has grown: Reset, record the widget frame,
+// Bin into reused slices, AppendBytes into a reused buffer.
+func TestSteadyFrameAllocatesNothing(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector allocates")
+	}
+	l := nl(960, 2834)
+	var spans, list []uint32
+	var buf []byte
+	frame := func() {
+		l.Reset()
+		WidgetFrame(l)
+		var err error
+		if spans, list, err = l.Bin(spans, list); err != nil {
+			t.Fatal(err)
+		}
+		buf = AppendBytes(buf[:0], l.Instances())
+	}
+	frame()
+	if n := testing.AllocsPerRun(5, frame); n != 0 {
+		t.Fatalf("a steady frame allocates %v times", n)
+	}
+}
+
+// BenchmarkBin is the binning of the widget frame into reused slices.
+func BenchmarkBin(b *testing.B) {
+	l := nl(960, 2834)
+	WidgetFrame(l)
+	var spans, list []uint32
+	b.ReportAllocs()
+	for b.Loop() {
+		spans, list, _ = l.Bin(spans, list)
+	}
+}
