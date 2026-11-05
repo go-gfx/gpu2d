@@ -112,3 +112,14 @@ kernel void raster(device const Inst *insts [[buffer(0)]],
   }
   px[i] = uchar4(uchar(r), uchar(g), uchar(b), uchar(a));
 }
+
+// present copies the frame into a layer's drawable. The drawable is BGRA;
+// written as RGBA floats, Metal stores the channels in its order, and c/255
+// converts back to the byte c exactly.
+kernel void present(device const uchar4 *px [[buffer(3)]],
+                    constant Frame &f [[buffer(4)]],
+                    texture2d<float, access::write> out [[texture(0)]],
+                    uint2 g [[thread_position_in_grid]]) {
+  if (g.x >= f.w || g.y >= f.h) { return; }
+  out.write(float4(px[g.y * f.w + g.x]) / 255.0f, g);
+}

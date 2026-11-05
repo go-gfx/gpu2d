@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/go-gfx/webgpu v0.15.0
 	github.com/go-gfx/wgsl v0.4.0
-	github.com/go-macos/metal v0.5.0
+	github.com/go-macos/metal v0.6.0
 )
 
 require (
