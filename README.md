@@ -5,10 +5,10 @@ of **instances**, one per primitive, which a GPU draws as one quad each and whic
 `Rasterize` executes on the CPU. `Rasterize` is the reference: it defines every
 pixel, and each GPU back-end is checked against it.
 
-**Status: milestone 3 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
+**Status: milestone 4 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
 list, the CPU reference, the WebGPU back-end (package `webgpu`, browser) and
-the Metal back-end (package `metal`, macOS) exist. Text, images and paths, and
-the go-widgets adapter, come next.
+the Metal back-end (package `metal`, macOS) exist, for rectangles, glyph
+masks, images and paths. The go-widgets adapter comes next.
 
 ## Measured
 
@@ -53,14 +53,25 @@ gpuInput := l.Instances() // 48 bytes each, what a GPU back-end uploads
 
 ## What it draws
 
-Fills and one-pixel outlines of rectangles, square or with anti-aliased rounded
-corners, any number of concentric rings, under nested translations and clips.
+- Fills and one-pixel outlines of rectangles, square or with anti-aliased
+  rounded corners, any number of concentric rings.
+- `DrawMask`: one colour through 8-bit coverage, which is what a glyph is.
+- `DrawImage`: RGBA pixels scaled by nearest neighbour.
+- `DrawAlpha`: per-pixel alpha from a coverage grid, which is what a path
+  rasterizer (go-gfx/gfx/vector) produces.
+
+All of them work under nested translations and clips. Masks and images live in
+the list's data arena (`Data`), which the GPU reads alongside the instances.
+
 These are the primitives of go-widgets/painter's `PixelPainter`, and
-`Rasterize` reproduces it **byte for byte**: `internal/parity` (its own module,
-so this one does not depend on go-widgets) renders 3000 random scenes, 42,256
-instances in all, with both and compares every byte. The scenes mix
-translucent colours, rectangles past every edge, degenerate sizes, radii past
-half a side and nested clips; a control shows the comparison can fail.
+`Rasterize` reproduces it **byte for byte**. `internal/parity` is its own
+module, so this one does not depend on go-widgets. It renders 3000 random
+scenes with both renderers and compares every byte: 51,947 instances in all,
+including 2970 masks, 2999 images and 11,251 filled and stroked paths
+rasterized by the same go-gfx/gfx/vector rasterizer PixelPainter uses. The
+scenes mix translucent colours, rectangles past every edge, degenerate sizes,
+radii past half a side, short masks and nested clips. A control shows the
+comparison can fail.
 
 ## The contract for a GPU back-end
 
@@ -102,10 +113,17 @@ refused before anything is allocated.
 ## Bounds
 
 Every coordinate a list records, translation included, lies within ±2^24
-(`MaxCoord`), the range in which float32 holds every integer exactly. A
-primitive reaching past it is not recorded instead of being wrapped into the
-32-bit instance; translations and clips saturate; a surface side above it is
-`ErrSize`; ring counts are capped. `FuzzList` drives arbitrary operations and
+(`MaxCoord`), the range in which float32 holds every integer exactly.
+
+- A primitive reaching past `MaxCoord` is not recorded, rather than wrapped
+  into the 32-bit instance.
+- Translations and clips saturate, and ring counts are capped.
+- A surface side above `MaxCoord` is `ErrSize`.
+- The data arena is bounded by `MaxData` (256 MiB). An image is judged by its
+  declared size before its bytes are read.
+- An image whose scaling products reach `MaxScaled` is refused, because a
+  GPU computes them in 32-bit integers.
+- Refusals are reported by `List.Err`. `FuzzList` drives arbitrary operations and
 checks that nothing is recorded past the bounds and that `Rasterize` writes
 nothing past the surface (corpus in `testdata/fuzz`).
 

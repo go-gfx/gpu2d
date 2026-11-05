@@ -12,10 +12,11 @@ import "encoding/binary"
 func AppendBytes(dst []byte, ins []Instance) []byte {
 	for i := range ins {
 		in := &ins[i]
-		for _, v := range [12]uint32{
+		for _, v := range [16]uint32{
 			uint32(in.X), uint32(in.Y), uint32(in.W), uint32(in.H),
 			uint32(in.ClipX0), uint32(in.ClipY0), uint32(in.ClipX1), uint32(in.ClipY1),
-			in.Color, uint32(in.Radius), uint32(in.Kind), 0,
+			in.Color, uint32(in.Radius), uint32(in.Kind),
+			in.Data, in.Stride, in.SrcW, in.SrcH, 0,
 		} {
 			dst = binary.LittleEndian.AppendUint32(dst, v)
 		}

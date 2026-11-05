@@ -19,16 +19,61 @@ func (l *List) Rasterize(buf []byte) error {
 		return ErrBuffer
 	}
 	for i := range l.instances {
-		rasterize(buf, l.w, &l.instances[i])
+		in := &l.instances[i]
+		switch in.Kind {
+		case KindMask, KindAlpha:
+			rasterizeMask(buf, l.w, l.data, in)
+		case KindImage:
+			rasterizeImage(buf, l.w, l.data, in)
+		default:
+			rasterize(buf, l.w, in)
+		}
 	}
 	return nil
+}
+
+// rasterizeMask paints a KindMask or KindAlpha instance, whose rectangle is
+// its visible box. A mask's alpha is its coverage, scaled by a translucent
+// ink's alpha with PixelPainter's floored product; an alpha instance's is
+// the stored byte.
+func rasterizeMask(buf []byte, stride int, data []byte, in *Instance) {
+	c := unpack(in.Color)
+	for y := range int(in.H) {
+		row := data[int(in.Data)+y*int(in.Stride):]
+		for x := range int(in.W) {
+			a := uint32(row[x])
+			if a == 0 {
+				continue
+			}
+			if in.Kind == KindMask && c.A != 0xFF {
+				a = a * uint32(c.A) / 255
+			}
+			col := c
+			col.A = uint8(a)
+			blend(buf[((int(in.Y)+y)*stride+int(in.X)+x)*4:], col)
+		}
+	}
+}
+
+// rasterizeImage draws a KindImage instance: each visible pixel takes the
+// source texel PixelPainter's nearest-neighbour mapping lands on.
+func rasterizeImage(buf []byte, stride int, data []byte, in *Instance) {
+	r := Rect{int(in.X), int(in.Y), int(in.W), int(in.H)}
+	x0, y0, x1, y1 := box(in)
+	sw, sh := int(in.SrcW), int(in.SrcH)
+	for y := y0; y < y1; y++ {
+		sy := (y - r.Y) * sh / r.H
+		for x := x0; x < x1; x++ {
+			o := int(in.Data) + (sy*sw+(x-r.X)*sw/r.W)*4
+			blend(buf[(y*stride+x)*4:], RGBA{data[o], data[o+1], data[o+2], data[o+3]})
+		}
+	}
 }
 
 func rasterize(buf []byte, stride int, in *Instance) {
 	r := Rect{int(in.X), int(in.Y), int(in.W), int(in.H)}
 	c := unpack(in.Color)
-	x0, y0 := max(r.X, int(in.ClipX0)), max(r.Y, int(in.ClipY0))
-	x1, y1 := min(r.X+r.W, int(in.ClipX1)), min(r.Y+r.H, int(in.ClipY1))
+	x0, y0, x1, y1 := box(in)
 	rad := int(in.Radius)
 	for y := y0; y < y1; y++ {
 		for x := x0; x < x1; x++ {
