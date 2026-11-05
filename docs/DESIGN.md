@@ -74,6 +74,24 @@ for WebGPU) at 1.08 ms for a 1080p widget frame and 2.79 ms at 4K, binning
 included. Presenting the frame through a `CAMetalLayer` instead of the CPU
 blit moves to milestone 5 with the window integration.
 
+### Asynchronous submit (v0.3.0)
+
+On a small frame the GPU is not the cost: an empty dispatch alone is 0.41 ms
+on an M4 Max, and `Draw` blocks the CPU for all of it. go-macos/metal v0.4.0
+adds `Device.Submit` (commit without `waitUntilCompleted`) and
+`Pending.Wait`/`Done`, from MTLCommandBuffer's `commit`, `waitUntilCompleted`
+and `status` (MTLCommandBuffer.h). The Renderer keeps two slots of input
+buffers (instances, spans, list, data): `Submit` bins and packs into a free
+slot, so the list is free to be reset at once and the CPU records frame N+1
+while the GPU draws frame N. The target is one buffer; command buffers on one
+queue run in order, so two frames in flight composite in submission order.
+`Pixels` is therefore safe to read only after the last `Wait`. Misuse is an
+error, not a hang: a third `Submit` is `ErrBusy`, `Wait` with nothing in
+flight is `ErrNothingInFlight`, and `Close` drains first.
+
+List, Bin and AppendBytes were checked for per-frame allocation: with reused
+slices they allocate nothing (`TestSteadyFrameAllocatesNothing`).
+
 ### Masks, images and paths (milestone 4)
 
 Everything PixelPainter draws beyond rectangles carries data, so masks and

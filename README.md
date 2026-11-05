@@ -103,6 +103,25 @@ err = r.Draw(list)             // bins, dispatches, waits
 frame := r.Pixels()
 ```
 
+`Draw` is `Submit` plus `Wait`. For a small frame, where the time is the
+fixed cost of the round trip, overlap the CPU with the GPU:
+
+```go
+err = r.Submit(list) // bins and packs a copy of the list, sends it, returns
+list.Reset()         // free at once: record the next frame while the GPU draws
+record(list)
+err = r.Wait()       // the GPU's verdict on the oldest frame in flight
+frame := r.Pixels()  // safe to read only when nothing is in flight
+```
+
+Two frames may be in flight (each owns its input buffers); they composite in
+submission order over the same `Pixels`. A third `Submit` or a `Draw` while
+frames are in flight is `ErrBusy`, a `Wait` with none is `ErrNothingInFlight`,
+and `Close` waits for what is in flight before releasing memory.
+`InFlight()` counts them. `Pixels` belongs to the GPU until the last `Wait`.
+`List`, `Bin` and `AppendBytes` allocate nothing in steady state
+(`TestSteadyFrameAllocatesNothing`).
+
 A compute kernel through go-macos/metal (pure Go, no cgo): `List.Bin` sorts
 the instances into 16 × 16 tiles on the CPU, then one GPU thread per pixel
 walks its tile's instances in order, computes `Coverage` (with

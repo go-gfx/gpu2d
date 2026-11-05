@@ -124,3 +124,159 @@ func BenchmarkWidgetFrame(b *testing.B) {
 		})
 	}
 }
+
+// translucent returns a list of overlapping translucent fills: the result
+// depends on the order frames are composited in.
+func translucent(w, h int, shift int) *gpu2d.List {
+	l, _ := gpu2d.NewList(w, h)
+	l.FillRect(gpu2d.Rect{X: shift, Y: 0, W: w / 2, H: h}, gpu2d.RGBA{R: 200, G: 30, B: 10, A: 140})
+	l.FillRoundRect(gpu2d.Rect{X: 3, Y: shift, W: w - 6, H: h / 2}, 5, gpu2d.RGBA{R: 10, G: 40, B: 220, A: 120})
+	return l
+}
+
+// TestTwoFramesInFlightCompositeInOrder submits two lists back to back, with
+// the list reset and re-recorded between them (Submit copies), and holds the
+// result to the CPU compositing the same two lists in the same order.
+func TestTwoFramesInFlightCompositeInOrder(t *testing.T) {
+	const w, h = 64, 48
+	r := renderer(t, w, h)
+	a, b := translucent(w, h, 4), translucent(w, h, 9)
+	want := make([]byte, 4*w*h)
+	for i := range want {
+		want[i] = uint8(i * 5)
+	}
+	copy(r.Pixels(), want)
+	if err := a.Rasterize(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Rasterize(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Submit(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Submit(b); err != nil {
+		t.Fatal(err)
+	}
+	if r.InFlight() != 2 {
+		t.Fatalf("%d in flight", r.InFlight())
+	}
+	if err := r.Submit(a); !errors.Is(err, ErrBusy) {
+		t.Fatalf("a third Submit: %v", err)
+	}
+	if err := r.Draw(a); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Draw while in flight: %v", err)
+	}
+	for range 2 {
+		if err := r.Wait(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.InFlight() != 0 {
+		t.Fatalf("%d in flight after Wait", r.InFlight())
+	}
+	got := r.Pixels()
+	for i := range want {
+		if d := int(want[i]) - int(got[i]); d > 1 || d < -1 {
+			t.Fatalf("channel %d: CPU %d, GPU %d", i, want[i], got[i])
+		}
+	}
+}
+
+// TestSubmitCopiesTheList records frame A, submits it, overwrites the list
+// with frame B at once, and checks the GPU still drew A.
+func TestSubmitCopiesTheList(t *testing.T) {
+	const w, h = 32, 32
+	r := renderer(t, w, h)
+	l, _ := gpu2d.NewList(w, h)
+	l.FillRect(gpu2d.Rect{X: 0, Y: 0, W: w, H: h}, gpu2d.RGBA{R: 255, A: 255})
+	if err := r.Submit(l); err != nil {
+		t.Fatal(err)
+	}
+	l.Reset()
+	l.FillRect(gpu2d.Rect{X: 0, Y: 0, W: w, H: h}, gpu2d.RGBA{B: 255, A: 255})
+	if err := r.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if p := r.Pixels(); p[0] != 255 || p[2] != 0 {
+		t.Fatalf("pixel 0 = %v: the GPU drew the list as overwritten", p[:4])
+	}
+}
+
+func TestMisuse(t *testing.T) {
+	r := renderer(t, 8, 8)
+	if err := r.Wait(); !errors.Is(err, ErrNothingInFlight) {
+		t.Fatalf("Wait without Submit: %v", err)
+	}
+	l, _ := gpu2d.NewList(8, 8)
+	l.FillRect(gpu2d.Rect{X: 0, Y: 0, W: 8, H: 8}, gpu2d.RGBA{G: 255, A: 255})
+	if err := r.Submit(l); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Submit(l); err != nil { // the second slot: allowed
+		t.Fatal(err)
+	}
+	other, _ := gpu2d.NewList(9, 8)
+	if err := r.Submit(other); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Submit with both slots busy: %v", err)
+	}
+	// Close while two frames are in flight must drain, not crash.
+	r.Close()
+	if r.InFlight() != 0 {
+		t.Fatal("frames in flight after Close")
+	}
+	r.Close() // twice is harmless
+	if err := r.Submit(l); err == nil {
+		t.Fatal("Submit after Close succeeded")
+	}
+	if err := r.Draw(l); err == nil {
+		t.Fatal("Draw after Close succeeded")
+	}
+}
+
+func TestSubmitRefusesAWrongSizeAndATooLargeList(t *testing.T) {
+	r := renderer(t, 8, 8)
+	other, _ := gpu2d.NewList(9, 8)
+	if err := r.Submit(other); !errors.Is(err, ErrSize) {
+		t.Fatalf("a list of another size: %v", err)
+	}
+	if r.InFlight() != 0 {
+		t.Fatal("a refused Submit is in flight")
+	}
+}
+
+// BenchmarkOverlap is the point of Submit: per frame the CPU records the next
+// list while the GPU draws the last. "draw" is the synchronous baseline,
+// "overlap" waits for the previous frame only after recording the next.
+func BenchmarkOverlap(b *testing.B) {
+	const w, h = 960, 2834
+	for _, mode := range []string{"draw", "overlap"} {
+		b.Run(mode, func(b *testing.B) {
+			r := renderer(b, w, h)
+			l, _ := gpu2d.NewList(w, h)
+			b.ReportAllocs()
+			for b.Loop() {
+				l.Reset()
+				gpu2d.WidgetFrame(l)
+				if mode == "draw" {
+					if err := r.Draw(l); err != nil {
+						b.Fatal(err)
+					}
+					continue
+				}
+				// The frame above was recorded while the GPU drew the last one.
+				if r.InFlight() > 0 {
+					if err := r.Wait(); err != nil {
+						b.Fatal(err)
+					}
+				}
+				if err := r.Submit(l); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := r.Wait(); err != nil {
+				b.Fatal(err)
+			}
+		})
+	}
+}
