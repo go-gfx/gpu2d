@@ -16,4 +16,7 @@ func TestShaderValidates(t *testing.T) {
 	if err := wgsl.Validate(Shader); err != nil {
 		t.Fatal(err)
 	}
+	if err := wgsl.Validate(PresentShader); err != nil {
+		t.Fatalf("PresentShader: %v", err)
+	}
 }
