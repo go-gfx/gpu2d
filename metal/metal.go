@@ -21,10 +21,19 @@ import (
 	mtl "github.com/go-macos/metal"
 )
 
-// Kernel is the Metal Shading Language source; its entry point is "raster".
-//
+// Kernel is the Metal Shading Language source; its entry points are "raster"
+// and "present". The coverage functions are not written here: they are
+// generated from the WebGPU shader (coverage_gen.metal, by internal/mslgen),
+// so the arithmetic exists once, in WGSL.
+var Kernel = coverageMSL + kernelMSL
+
+//go:generate go run ../internal/mslgen/cmd/genmsl
+
+//go:embed coverage_gen.metal
+var coverageMSL string
+
 //go:embed kernel.metal
-var Kernel string
+var kernelMSL string
 
 // ErrSize reports a list whose surface is not the renderer's.
 var ErrSize = errors.New("gpu2d/metal: list size differs from the renderer's")
