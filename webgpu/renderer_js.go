@@ -193,6 +193,48 @@ func (r *Renderer) Draw(l *gpu2d.List, ground []byte) error {
 	return err
 }
 
+// ErrSurface reports a canvas surface Present cannot copy into: not
+// rgba8unorm, or its textures lack COPY_DST. CanvasDescriptor makes one that
+// can.
+var ErrSurface = errors.New("gpu2d/webgpu: the surface is not rgba8unorm with COPY_DST")
+
+// CanvasDescriptor is the configuration a canvas surface needs for Present:
+// rgba8unorm, which the WebGPU specification lists among the supported
+// context formats and which is the target's own format, so the copy is
+// byte-exact; and COPY_DST on top of the default RENDER_ATTACHMENT, which
+// copyTextureToTexture requires of its destination. Alpha stays "opaque".
+func CanvasDescriptor() wg.SurfaceDescriptor {
+	return wg.SurfaceDescriptor{
+		Format: wg.TextureFormatRGBA8Unorm,
+		Usage:  wg.TextureUsageRenderAttachment | wg.TextureUsageCopyDst,
+	}
+}
+
+// Present copies the target into the surface's current texture, on the GPU:
+// the frame goes to the canvas without coming back to Go memory. Call it
+// after Draw; the browser shows the canvas at the end of the task. The
+// surface must be the renderer's size and configured with CanvasDescriptor.
+func (r *Renderer) Present(s *wg.Surface) error {
+	if w, h := s.Size(); w != r.w || h != r.h {
+		return ErrSize
+	}
+	if s.Format() != wg.TextureFormatRGBA8Unorm {
+		return ErrSurface
+	}
+	t, err := s.CurrentTexture()
+	if err != nil {
+		return err
+	}
+	if t.Descriptor().Usage&wg.TextureUsageCopyDst == 0 {
+		return ErrSurface
+	}
+	r.rec.Reset()
+	r.rec.CopyTextureToTexture(wg.TexelCopyTextureInfo{Texture: r.target}, wg.TexelCopyTextureInfo{Texture: t},
+		wg.Extent3D{Width: uint32(r.w), Height: uint32(r.h), DepthOrArrayLayers: 1})
+	_, err = r.rec.Submit()
+	return err
+}
+
 // Read copies the target back to Go memory: 4·w·h bytes, RGBA rows top to
 // bottom. It waits for the GPU; it is for tests and screenshots.
 func (r *Renderer) Read(ctx context.Context) ([]byte, error) {
