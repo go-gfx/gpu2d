@@ -235,6 +235,22 @@ func (r *Renderer) Present(s *wg.Surface) error {
 	return err
 }
 
+// Destroy releases the renderer's buffers and target texture, refunding them
+// to the device's quota. A caller that replaces a renderer (a canvas resized)
+// destroys the old one, or each replacement keeps its memory charged. The
+// renderer must not be used after; Destroy twice is harmless. (Its pipeline
+// is not refunded: WebGPU has no way to destroy one.)
+func (r *Renderer) Destroy() {
+	for _, b := range []*wg.Buffer{r.uniform, r.inst, r.arena} {
+		if b != nil {
+			b.Destroy()
+		}
+	}
+	if r.target != nil {
+		r.target.Destroy()
+	}
+}
+
 // Read copies the target back to Go memory: 4·w·h bytes, RGBA rows top to
 // bottom. It waits for the GPU; it is for tests and screenshots.
 func (r *Renderer) Read(ctx context.Context) ([]byte, error) {
