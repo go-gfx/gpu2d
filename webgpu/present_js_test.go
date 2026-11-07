@@ -80,6 +80,66 @@ func TestAPresentedFrameIsTheFrame(t *testing.T) {
 	}
 }
 
+// The bgra8unorm canvas, the one browsers prefer on macOS and Windows, gets
+// the frame drawn by PresentShader; read back, its bytes are the frame's in
+// BGRA order.
+func TestABGRACanvasHoldsTheFrame(t *testing.T) {
+	const w, h = 64, 48
+	d, ctx := device(t)
+	r, err := New(ctx, d, w, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := d.NewSurface(wg.SurfaceDescriptor{Width: w, Height: h, Format: wg.TextureFormatBGRA8Unorm,
+		Usage: wg.TextureUsageRenderAttachment | wg.TextureUsageCopySrc})
+	if errors.Is(err, wg.ErrNoCanvasContext) {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Destroy()
+	for seed := range uint64(20) {
+		l, _ := gpu2d.NewList(w, h)
+		scenes.Random(l, seed, 40)
+		ground := make([]byte, 4*w*h)
+		for i := range ground {
+			ground[i] = uint8(i*11 + int(seed))
+			if i%4 == 3 {
+				ground[i] = 255
+			}
+		}
+		if err := r.Draw(l, ground); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Present(s); err != nil {
+			t.Fatal(err)
+		}
+		tex, err := s.CurrentTexture()
+		if err != nil {
+			t.Fatal(err)
+		}
+		shown, err := d.ReadTexture(ctx, wg.TexelCopyTextureInfo{Texture: tex}, w, h, 4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		frame, err := r.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < len(frame); i += 4 {
+			b, g, rr, a := shown[i], shown[i+1], shown[i+2], shown[i+3]
+			if rr != frame[i] || g != frame[i+1] || b != frame[i+2] || a != frame[i+3] {
+				p := i / 4
+				t.Fatalf("seed %d (%d,%d): frame RGBA %v, canvas BGRA %v", seed, p%w, p/w, frame[i:i+4], shown[i:i+4])
+			}
+		}
+		if bm, err := s.Present(); err == nil && bm.Truthy() {
+			bm.Call("close")
+		}
+	}
+}
+
 func TestPresentRefusals(t *testing.T) {
 	const w, h = 16, 16
 	d, ctx := device(t)
@@ -93,7 +153,7 @@ func TestPresentRefusals(t *testing.T) {
 		want error
 	}{
 		{"another size", func() wg.SurfaceDescriptor { c := CanvasDescriptor(); c.Width, c.Height = w+1, h; return c }(), ErrSize},
-		{"the preferred format", wg.SurfaceDescriptor{Width: w, Height: h, Format: wg.TextureFormatBGRA8Unorm, Usage: wg.TextureUsageRenderAttachment | wg.TextureUsageCopyDst}, ErrSurface},
+		{"a float canvas", wg.SurfaceDescriptor{Width: w, Height: h, Format: "rgba16float", Usage: wg.TextureUsageRenderAttachment | wg.TextureUsageCopyDst}, ErrSurface},
 		{"no COPY_DST", wg.SurfaceDescriptor{Width: w, Height: h, Format: wg.TextureFormatRGBA8Unorm}, ErrSurface},
 	} {
 		s, err := d.NewSurface(tc.desc)

@@ -40,6 +40,7 @@ type Renderer struct {
 	target  *wg.Texture
 	view    *wg.TextureView
 	rec     *wg.Recorder
+	show    *presentPass // drawn into a bgra8unorm canvas; nil until needed
 	bytes   []byte
 	padded  []byte // the arena, padded to whole words
 }
@@ -92,7 +93,7 @@ func New(ctx context.Context, d *wg.Device, w, h int) (*Renderer, error) {
 		return nil, err
 	}
 	if r.target, err = d.CreateTexture(wg.TextureDescriptor{Label: "gpu2d target", Size: wg.Extent3D{Width: uint32(w), Height: uint32(h)},
-		Format: wg.TextureFormatRGBA8Unorm, Usage: wg.TextureUsageRenderAttachment | wg.TextureUsageCopySrc | wg.TextureUsageCopyDst}); err != nil {
+		Format: wg.TextureFormatRGBA8Unorm, Usage: wg.TextureUsageRenderAttachment | wg.TextureUsageCopySrc | wg.TextureUsageCopyDst | wg.TextureUsageTextureBinding}); err != nil {
 		return nil, err
 	}
 	if r.view, err = r.target.CreateView(nil); err != nil {
@@ -193,10 +194,53 @@ func (r *Renderer) Draw(l *gpu2d.List, ground []byte) error {
 	return err
 }
 
-// ErrSurface reports a canvas surface Present cannot copy into: not
-// rgba8unorm, or its textures lack COPY_DST. CanvasDescriptor makes one that
+// ErrSurface reports a canvas surface Present cannot draw into: neither
+// rgba8unorm with COPY_DST nor bgra8unorm. CanvasDescriptor makes one that
 // can.
-var ErrSurface = errors.New("gpu2d/webgpu: the surface is not rgba8unorm with COPY_DST")
+var ErrSurface = errors.New("gpu2d/webgpu: the surface is neither rgba8unorm with COPY_DST nor bgra8unorm")
+
+// presentPass is the pipeline and bind group PresentShader draws with,
+// built the first time a bgra8unorm surface is presented.
+type presentPass struct {
+	pipe  *wg.RenderPipeline
+	group *wg.BindGroup
+}
+
+func (r *Renderer) presentPass() (*presentPass, error) {
+	if r.show != nil {
+		return r.show, nil
+	}
+	bgl, err := r.d.CreateBindGroupLayout(wg.BindGroupLayoutDescriptor{Entries: []wg.BindGroupLayoutEntry{
+		{Binding: 0, Visibility: wg.ShaderStageFragment, Texture: &wg.TextureBindingLayout{SampleType: wg.TextureSampleTypeFloat, ViewDimension: wg.TextureViewDimension2D}},
+	}})
+	if err != nil {
+		return nil, err
+	}
+	pl, err := r.d.CreatePipelineLayout(wg.PipelineLayoutDescriptor{BindGroupLayouts: []*wg.BindGroupLayout{bgl}})
+	if err != nil {
+		return nil, err
+	}
+	mod, err := r.d.CreateShaderModule(wg.ShaderModuleDescriptor{Label: "gpu2d present", Code: PresentShader})
+	if err != nil {
+		return nil, err
+	}
+	pipe, err := r.d.CreateRenderPipeline(wg.RenderPipelineDescriptor{
+		Label:     "gpu2d present",
+		Layout:    pl,
+		Vertex:    wg.VertexState{Module: mod, EntryPoint: "vs"},
+		Primitive: wg.PrimitiveState{Topology: wg.PrimitiveTopologyTriangleList, CullMode: wg.CullModeNone},
+		Fragment:  &wg.FragmentState{Module: mod, EntryPoint: "fs", Targets: []wg.ColorTargetState{{Format: wg.TextureFormatBGRA8Unorm}}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	group, err := r.d.CreateBindGroup(wg.BindGroupDescriptor{Layout: bgl, Entries: []wg.BindGroupEntry{{Binding: 0, TextureView: r.view}}})
+	if err != nil {
+		return nil, err
+	}
+	r.show = &presentPass{pipe: pipe, group: group}
+	return r.show, nil
+}
 
 // CanvasDescriptor is the configuration a canvas surface needs for Present:
 // rgba8unorm, which the WebGPU specification lists among the supported
@@ -210,15 +254,20 @@ func CanvasDescriptor() wg.SurfaceDescriptor {
 	}
 }
 
-// Present copies the target into the surface's current texture, on the GPU:
+// Present puts the target into the surface's current texture, on the GPU:
 // the frame goes to the canvas without coming back to Go memory. Call it
 // after Draw; the browser shows the canvas at the end of the task. The
-// surface must be the renderer's size and configured with CanvasDescriptor.
+// surface must be the renderer's size, and either rgba8unorm with COPY_DST
+// (a copyTextureToTexture) or bgra8unorm (a pass drawing PresentShader).
 func (r *Renderer) Present(s *wg.Surface) error {
 	if w, h := s.Size(); w != r.w || h != r.h {
 		return ErrSize
 	}
-	if s.Format() != wg.TextureFormatRGBA8Unorm {
+	switch s.Format() {
+	case wg.TextureFormatRGBA8Unorm:
+	case wg.TextureFormatBGRA8Unorm:
+		return r.presentDrawn(s)
+	default:
 		return ErrSurface
 	}
 	t, err := s.CurrentTexture()
@@ -231,6 +280,28 @@ func (r *Renderer) Present(s *wg.Surface) error {
 	r.rec.Reset()
 	r.rec.CopyTextureToTexture(wg.TexelCopyTextureInfo{Texture: r.target}, wg.TexelCopyTextureInfo{Texture: t},
 		wg.Extent3D{Width: uint32(r.w), Height: uint32(r.h), DepthOrArrayLayers: 1})
+	_, err = r.rec.Submit()
+	return err
+}
+
+// presentDrawn draws the target into a bgra8unorm surface.
+func (r *Renderer) presentDrawn(s *wg.Surface) error {
+	pp, err := r.presentPass()
+	if err != nil {
+		return err
+	}
+	v, err := s.CurrentView()
+	if err != nil {
+		return err
+	}
+	r.rec.Reset()
+	p := r.rec.BeginRenderPass(wg.RenderPassDescriptor{ColorAttachments: []*wg.RenderPassColorAttachment{
+		{View: v, LoadOp: wg.LoadOpClear, StoreOp: wg.StoreOpStore},
+	}})
+	p.SetPipeline(pp.pipe)
+	p.SetBindGroup(0, pp.group)
+	p.Draw(3, 1, 0, 0)
+	p.End()
 	_, err = r.rec.Submit()
 	return err
 }
