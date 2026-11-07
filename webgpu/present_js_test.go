@@ -27,9 +27,10 @@ func TestAPresentedFrameIsTheFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	desc := CanvasDescriptor()
-	desc.Width, desc.Height = w, h
-	desc.Usage |= wg.TextureUsageCopySrc // so the test can read the canvas back
+	// The copy path explicitly: CanvasDescriptor follows the browser's
+	// preferred format, which may be bgra8unorm (TestABGRACanvasHoldsTheFrame).
+	desc := wg.SurfaceDescriptor{Width: w, Height: h, Format: wg.TextureFormatRGBA8Unorm,
+		Usage: wg.TextureUsageRenderAttachment | wg.TextureUsageCopyDst | wg.TextureUsageCopySrc}
 	s, err := d.NewSurface(desc)
 	if errors.Is(err, wg.ErrNoCanvasContext) {
 		t.Skip(err)
@@ -138,6 +139,27 @@ func TestABGRACanvasHoldsTheFrame(t *testing.T) {
 			bm.Call("close")
 		}
 	}
+}
+
+// CanvasDescriptor follows the browser's preferred canvas format, with the
+// usage Present needs for it.
+func TestCanvasDescriptorIsThePreferredFormat(t *testing.T) {
+	nav, err := wg.Navigator()
+	if err != nil {
+		t.Skip(err)
+	}
+	desc := CanvasDescriptor()
+	switch pref := nav.PreferredCanvasFormat(); pref {
+	case wg.TextureFormatBGRA8Unorm:
+		if desc.Format != wg.TextureFormatBGRA8Unorm {
+			t.Fatalf("preferred %s, descriptor %s", pref, desc.Format)
+		}
+	default:
+		if desc.Format != wg.TextureFormatRGBA8Unorm || desc.Usage&wg.TextureUsageCopyDst == 0 {
+			t.Fatalf("preferred %s, descriptor %s usage %#x: want rgba8unorm with COPY_DST", pref, desc.Format, desc.Usage)
+		}
+	}
+	t.Logf("preferred canvas format %s", nav.PreferredCanvasFormat())
 }
 
 func TestPresentRefusals(t *testing.T) {

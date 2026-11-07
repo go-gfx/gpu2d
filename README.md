@@ -98,18 +98,35 @@ To put the frame on a `<canvas>` without reading it back, configure the
 canvas's surface with `CanvasDescriptor()` and present after each draw:
 
 ```go
-desc := gpu2dwebgpu.CanvasDescriptor() // rgba8unorm, RENDER_ATTACHMENT | COPY_DST
+desc := gpu2dwebgpu.CanvasDescriptor() // the browser's preferred canvas format
 s, err := device.NewSurfaceFromCanvas(offscreen, desc)
 err = r.Draw(list, nil)
-err = r.Present(s)                      // copyTextureToTexture into the canvas texture
+err = r.Present(s)                      // into the canvas texture, on the GPU
 ```
 
-The WebGPU specification lists `rgba8unorm` among the supported canvas
-formats. It is the target's own format, so the copy is byte-exact, and
-`copyTextureToTexture` requires `COPY_DST` on its destination. A surface in
-another format (such as the browser's preferred `bgra8unorm`) or without
-`COPY_DST` is `ErrSurface`. `TestAPresentedFrameIsTheFrame` reads the canvas
-texture back and finds the frame, byte for byte.
+`CanvasDescriptor` follows `getPreferredCanvasFormat`, and `Present` handles
+both of the formats it can return (both are supported canvas formats in the
+WebGPU specification):
+
+- **`bgra8unorm`**, preferred on macOS and Windows. `Present` draws the target
+  into it with `PresentShader`: one triangle, a `textureLoad` at each pixel.
+  `unorm8 → float → unorm8` gives back the same byte, and
+  `TestABGRACanvasHoldsTheFrame` finds the frame's bytes in BGRA order.
+- **`rgba8unorm`** elsewhere, with `COPY_DST`. `Present` copies with
+  `copyTextureToTexture`; it is the target's own format, so the copy is
+  byte-exact (`TestAPresentedFrameIsTheFrame`).
+- **Anything else** is `ErrSurface`.
+
+**Why the preferred format.** A canvas in a format the browser does not
+prefer costs an extra copy in its compositor; Chrome warns about it.
+`internal/presentbench` loads a real page and times `WidgetFrame` at 4K,
+`Draw` plus `Present` per animation frame, until the GPU has finished. On an
+Apple M4 Max, over 8 interleaved rounds at a 1-minute load of 8 or less:
+
+| canvas | per frame |
+|---|---:|
+| rgba8unorm (copy, then the compositor's copy) | 1.053 ms ± 6 % |
+| bgra8unorm (one render pass) | 0.792 ms ± 18 % (−24.8 %, p = 0.000) |
 
 ## Metal (package `metal`, macOS)
 
