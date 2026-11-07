@@ -1,0 +1,4 @@
+# Generated files keep the generator's LF line endings on every checkout,
+# Windows included: TestCoverageMetalIsGenerated compares the committed file
+# byte for byte with what the generator writes.
+metal/coverage_gen.metal text eol=lf
