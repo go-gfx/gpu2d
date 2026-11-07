@@ -20,6 +20,7 @@ package presentbench
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,7 +55,10 @@ func TestMain(m *testing.M) {
 	build.Dir = filepath.Dir(self)
 	build.Env = append(os.Environ(), "GOOS=js", "GOARCH=wasm")
 	if out, err := build.CombinedOutput(); err != nil {
-		panic(string(out))
+		// The error too, not only the output: a source directory that no
+		// longer exists (the checkout moved to another branch) fails before
+		// the compiler prints anything.
+		panic(fmt.Sprintf("building the page in %s: %v\n%s", build.Dir, err, out))
 	}
 	execJS, err := os.ReadFile(filepath.Join(runtime.GOROOT(), "lib", "wasm", "wasm_exec.js"))
 	if err != nil {
