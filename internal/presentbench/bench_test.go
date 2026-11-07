@@ -48,6 +48,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	build := exec.Command("go", "build", "-o", filepath.Join(dir, "page.wasm"), "./page")
+	// From this file's own directory: a compiled test binary (go test -c,
+	// run by abbench) runs wherever it is started, not in the package.
+	_, self, _, _ := runtime.Caller(0)
+	build.Dir = filepath.Dir(self)
 	build.Env = append(os.Environ(), "GOOS=js", "GOARCH=wasm")
 	if out, err := build.CombinedOutput(); err != nil {
 		panic(string(out))
