@@ -51,11 +51,18 @@ func main() {
 		fail(err)
 		return
 	}
-	a, err := nav.RequestAdapter(ctx, nil)
+	// The discrete GPU where there is one: a machine with an integrated GPU
+	// too (a Ryzen 7000 has one) otherwise gets the low-power adapter.
+	a, err := nav.RequestAdapter(ctx, &wg.RequestAdapterOptions{PowerPreference: wg.PowerPreferenceHighPerformance})
 	if err != nil {
 		fail(err)
 		return
 	}
+	// Which GPU drew: a software Vulkan (Mesa's lavapipe) is not flagged as
+	// a fallback adapter, so the harness reports this with every result.
+	info := a.Info()
+	js.Global().Set("__adapter", info.Vendor+" / "+info.Architecture+" / "+info.Device+" / "+info.Description+
+		" / preferred canvas format "+string(nav.PreferredCanvasFormat()))
 	d, err := a.RequestDevice(ctx, &wg.DeviceDescriptor{Label: "presentbench"})
 	if err != nil {
 		fail(err)
