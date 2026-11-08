@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,8 +44,27 @@ WebAssembly.instantiateStreaming(fetch("page.wasm"), go.importObject).then(r => 
 
 var site string // the served page, built once
 
+// On a host without Go (a cross-compiled test binary copied to another
+// machine), the page is built beforehand: PRESENTBENCH_BUILD_SITE=dir builds
+// it into dir and exits, and PRESENTBENCH_SITE=dir serves that dir instead of
+// building. CHROME names the browser executable and PRESENTBENCH_FLAGS adds
+// space-separated Chrome switches (a Linux GPU may need Vulkan ones).
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "presentbench")
+	if dir := os.Getenv("PRESENTBENCH_SITE"); dir != "" {
+		srv := httptest.NewServer(http.FileServer(http.Dir(dir)))
+		site = srv.URL
+		code := m.Run()
+		srv.Close()
+		os.Exit(code)
+	}
+	dir := os.Getenv("PRESENTBENCH_BUILD_SITE")
+	keep := dir != ""
+	var err error
+	if keep {
+		err = os.MkdirAll(dir, 0o755)
+	} else {
+		dir, err = os.MkdirTemp("", "presentbench")
+	}
 	if err != nil {
 		panic(err)
 	}
@@ -66,6 +86,10 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.WriteFile(filepath.Join(dir, "wasm_exec.js"), execJS, 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "index.html"), []byte(index), 0o644)
+	if keep {
+		fmt.Println("presentbench: site built in", dir)
+		os.Exit(0)
+	}
 	srv := httptest.NewServer(http.FileServer(http.Dir(dir)))
 	site = srv.URL
 	code := m.Run()
@@ -82,6 +106,17 @@ func frameTime(b *testing.B, format string) float64 {
 		chromedp.Flag("enable-unsafe-webgpu", true),
 		chromedp.Flag("disable-gpu-vsync", true),
 		chromedp.Flag("disable-frame-rate-limit", true))
+	if p := os.Getenv("CHROME"); p != "" {
+		opts = append(opts, chromedp.ExecPath(p))
+	}
+	for _, f := range strings.Fields(os.Getenv("PRESENTBENCH_FLAGS")) {
+		name, value, hasValue := strings.Cut(strings.TrimPrefix(f, "--"), "=")
+		if hasValue {
+			opts = append(opts, chromedp.Flag(name, value))
+		} else {
+			opts = append(opts, chromedp.Flag(name, true))
+		}
+	}
 	actx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 	ctx, cancel2 := chromedp.NewContext(actx)
@@ -96,6 +131,9 @@ func frameTime(b *testing.B, format string) float64 {
 			b.Skipf("the page could not draw: %s", e)
 		}
 		if ns, err := chromedp.Run(ctx, chromedp.Evaluate[float64](`window.__nsPerFrame || 0`)); err == nil && ns > 0 {
+			if a, err := chromedp.Run(ctx, chromedp.Evaluate[string](`window.__adapter || ""`)); err == nil {
+				b.Logf("adapter: %s", a) // which GPU drew it
+			}
 			return ns
 		}
 		if time.Now().After(deadline) {
