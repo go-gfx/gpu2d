@@ -147,12 +147,16 @@ go-widgets/painter, and the adapter of milestone 5 applies the translation.
    `Renderer.Present` copies the frame into a `CAMetalLayer`'s drawable with a
    second kernel, so the frame never returns to the CPU (done, v0.4.0). The
    Cocoa window hosts it (go-widgets/window v0.90.0, `Config.GPU`). In a
-   browser, `webgpu.Renderer.Present` copies the target into an rgba8unorm
-   canvas texture with `copyTextureToTexture` (v0.5.0; WebGPU spec, supported
-   context formats and copy validation). Next: webcanvas presents through it.
-6. A WGSL→MSL emitter in go-gfx/wgsl (its `Info` already carries types, layouts
-   and entry points) retires the second copy of the coverage expression, which
-   today exists in Go, WGSL and MSL, each held to the CPU reference by test.
+   browser, `webgpu.Renderer.Present` puts the target into the canvas texture
+   in the browser's preferred format (v0.6.0): `copyTextureToTexture` into
+   rgba8unorm, `PresentShader` into bgra8unorm (WebGPU spec, supported context
+   formats and copy validation). go-widgets/webcanvas v0.9.0 presents through
+   it (done).
+6. A WGSL→MSL emitter in go-gfx/wgsl retires the hand-written Metal copy of the
+   coverage expression (done: wgsl v0.5.0's `msl` package; since gpu2d v0.5.2,
+   `metal/coverage_gen.metal` is generated from the WebGPU shader and
+   `TestCoverageMetalIsGenerated` catches drift). The coverage now exists in
+   Go and WGSL, each held to the CPU reference by test.
 
 ## Sources opened
 
