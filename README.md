@@ -120,13 +120,25 @@ WebGPU specification):
 **Why the preferred format.** A canvas in a format the browser does not
 prefer costs an extra copy in its compositor; Chrome warns about it.
 `internal/presentbench` loads a real page and times `WidgetFrame` at 4K,
-`Draw` plus `Present` per animation frame, until the GPU has finished. On an
-Apple M4 Max, over 8 interleaved rounds at a 1-minute load of 8 or less:
+`Draw` plus `Present` per animation frame, until the GPU has finished. Each
+platform ran 8 interleaved rounds at a 1-minute load of 8 or less, and the
+harness logs the adapter with every result:
 
-| canvas | per frame |
-|---|---:|
-| rgba8unorm (copy, then the compositor's copy) | 1.053 ms ± 6 % |
-| bgra8unorm (one render pass) | 0.792 ms ± 18 % (−24.8 %, p = 0.000) |
+| 4K frame | rgba8unorm canvas | bgra8unorm canvas |
+|---|---:|---:|
+| Apple M4 Max, macOS, Chrome (prefers bgra8unorm) | 1.053 ms ± 6 % | **0.792 ms ± 18 %** (−24.8 %, p = 0.000) |
+| AMD Radeon PRO W7700 (RDNA 3), Linux, Chrome for Testing 157 on Vulkan (prefers rgba8unorm) | **0.704 ms ± 30 %** | 1.083 ms ± 15 % (+53.7 %, p = 0.000) |
+
+On both, the preferred format wins, even though the formats are opposite.
+That is why `CanvasDescriptor` asks the browser rather than fixing a format.
+
+To run it on a host without Go, build the page beforehand
+(`PRESENTBENCH_BUILD_SITE=dir`) and serve it there (`PRESENTBENCH_SITE=dir`).
+`CHROME` names the browser, and `PRESENTBENCH_FLAGS` adds switches; Linux
+needs `--enable-features=Vulkan --use-angle=vulkan --use-vulkan
+--ignore-gpu-blocklist --use-webgpu-power-preference=default-high-performance`.
+The page asks for the high-performance adapter: without it, a Ryzen 7000
+machine gets its integrated RDNA 2 GPU (36 ms per frame).
 
 ## Metal (package `metal`, macOS)
 
