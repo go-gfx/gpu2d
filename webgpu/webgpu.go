@@ -34,3 +34,21 @@ const PresentShader = `
   return textureLoad(frame, vec2i(pos.xy), 0);
 }
 `
+
+// computePresentShader draws a compute-mode renderer's pixel buffer into a
+// canvas: one triangle covering it, each fragment unpacking its own pixel.
+// unorm8 → float → unorm8 gives back the same byte, in the canvas' channel
+// order, whatever the canvas' format.
+const computePresentShader = `
+@group(0) @binding(0) var<storage, read> px: array<u32>;
+@group(0) @binding(1) var<uniform> f: vec4<u32>; // w, h, ...
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return unpack4x8unorm(px[u32(pos.y) * f.x + u32(pos.x)]);
+}
+`
