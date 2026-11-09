@@ -8,7 +8,9 @@ pixel, and each GPU back-end is checked against it.
 **Status: milestone 4 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
 list, the CPU reference, the WebGPU back-end (package `webgpu`, browser) and
 the Metal back-end (package `metal`, macOS) exist, for rectangles, glyph
-masks, images and paths. The go-widgets adapter comes next.
+masks, images and paths. The go-widgets adapter comes next. Linux (Vulkan)
+and Windows (Direct3D 11) are designed, not built:
+[docs/NATIVE.md](docs/NATIVE.md).
 
 ## Measured
 
