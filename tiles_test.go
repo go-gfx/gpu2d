@@ -11,19 +11,33 @@ import (
 )
 
 // Bin against brute force: every tile lists exactly the instances whose box
-// touches it, in draw order.
+// touches it, in draw order, from the last one that hides the tile whole (an
+// opaque square-cornered fill containing the tile's pixels) onwards.
 func TestBinMatchesBruteForce(t *testing.T) {
 	var spans, list []uint32
-	for seed := range uint64(200) {
+	culled := 0
+	for seed := range uint64(300) {
 		r := rand.New(rand.NewPCG(seed, 1))
 		w, h := 1+r.IntN(70), 1+r.IntN(70)
 		l := nl(w, h)
 		for range 30 {
-			rc := Rect{X: r.IntN(w+20) - 10, Y: r.IntN(h+20) - 10, W: r.IntN(40), H: r.IntN(40)}
+			rc := Rect{X: r.IntN(w+20) - 10, Y: r.IntN(h+20) - 10, W: r.IntN(60), H: r.IntN(60)}
 			if r.IntN(4) == 0 {
-				l.PushClip(Rect{X: r.IntN(w), Y: r.IntN(h), W: r.IntN(30) + 1, H: r.IntN(30) + 1})
+				l.PushClip(Rect{X: r.IntN(w), Y: r.IntN(h), W: r.IntN(40) + 1, H: r.IntN(40) + 1})
 			}
-			l.FillRoundRect(rc, r.IntN(6), RGBA{A: 255})
+			alpha := uint8(255)
+			if r.IntN(3) == 0 {
+				alpha = uint8(r.IntN(255)) // translucent: never hides
+			}
+			rad := 0
+			if r.IntN(3) == 0 {
+				rad = 1 + r.IntN(5) // rounded: its corners let the ground through
+			}
+			if r.IntN(5) == 0 {
+				l.StrokeRect(rc, RGBA{A: 255}, 1+r.IntN(3)) // an outline: never hides
+			} else {
+				l.FillRoundRect(rc, rad, RGBA{A: alpha})
+			}
 			if r.IntN(3) == 0 {
 				l.PopClip()
 			}
@@ -39,10 +53,26 @@ func TestBinMatchesBruteForce(t *testing.T) {
 		}
 		for ty := range down {
 			for tx := range across {
+				// The tile's pixels, cut by the surface edge.
+				px0, py0 := tx*Tile, ty*Tile
+				px1, py1 := min(px0+Tile, w), min(py0+Tile, h)
+				from := 0
+				for k := range l.instances {
+					in := &l.instances[k]
+					x0, y0, x1, y1 := box(in)
+					opaque := in.Kind == KindFill && in.Radius <= 0 && in.Color>>24 == 0xFF
+					if opaque && x0 <= px0 && y0 <= py0 && x1 >= px1 && y1 >= py1 {
+						from = k
+					}
+				}
 				var want []uint32
 				for k := range l.instances {
 					x0, y0, x1, y1 := box(&l.instances[k])
 					if x0 < (tx+1)*Tile && x1 > tx*Tile && y0 < (ty+1)*Tile && y1 > ty*Tile {
+						if k < from {
+							culled++
+							continue
+						}
 						want = append(want, uint32(k))
 					}
 				}
@@ -59,6 +89,12 @@ func TestBinMatchesBruteForce(t *testing.T) {
 			}
 		}
 	}
+	// The rule must actually fire, or this test would pass on a Bin that
+	// culls nothing.
+	if culled < 1000 {
+		t.Fatalf("only %d entries hidden over 300 scenes: the scenes do not exercise culling", culled)
+	}
+	t.Logf("%d entries hidden by a later opaque fill", culled)
 }
 
 // A list that would bin past MaxBinned is refused before anything is

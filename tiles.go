@@ -28,6 +28,13 @@ func (l *List) Tiles() (across, down int) {
 // after row: the first entry of the tile in list, and how many. list gets
 // instance indices, each tile's in draw order. Both reuse the storage of the
 // slices passed in.
+//
+// Since v0.7.0 a tile omits the instances drawn before the last one that
+// hides it entirely: an opaque fill with square corners whose box covers
+// the whole tile. Such a fill sets every pixel of the tile to its colour
+// whatever lies beneath (Coverage is 1 and the blend overwrites), so a back
+// end compositing the tile's list in order draws the same bytes with less
+// work.
 func (l *List) Bin(spans, list []uint32) ([]uint32, []uint32, error) {
 	across, down := l.Tiles()
 	total := 0
@@ -39,17 +46,39 @@ func (l *List) Bin(spans, list []uint32) ([]uint32, []uint32, error) {
 		}
 	}
 	spans = append(spans[:0], make([]uint32, 2*across*down)...)
+	l.cover = append(l.cover[:0], make([]uint32, across*down)...)
+	cover := l.cover
 	// Two passes over every (instance, tile) pair, counting then placing.
 	// They are written out rather than shared through a callback: a frame
 	// has one pair per instance per tile it touches (a full-surface fill
 	// alone is every tile), and an indirect call per pair was most of the
-	// cost of binning (go-gfx/gpu2d#20).
+	// cost of binning (go-gfx/gpu2d#20). The counting pass also finds each
+	// tile's last hiding instance and restarts the tile's count there.
 	for k := range l.instances {
-		x0, y0, x1, y1 := box(&l.instances[k])
+		in := &l.instances[k]
+		x0, y0, x1, y1 := box(in)
+		cx0, cx1, cy0, cy1 := 1, 0, 1, 0 // no tile hidden
+		if hides(in) {
+			cx0, cx1 = wholeTiles(x0, x1, l.w)
+			cy0, cy1 = wholeTiles(y0, y1, l.h)
+		}
+		tx0 := x0 / Tile
 		for ty := y0 / Tile; ty <= (y1-1)/Tile; ty++ {
-			row := spans[2*(ty*across+x0/Tile) : 2*(ty*across+(x1-1)/Tile+1)]
-			for i := 1; i < len(row); i += 2 {
-				row[i]++
+			base := ty * across
+			row := spans[2*(base+tx0) : 2*(base+(x1-1)/Tile+1)]
+			if ty < cy0 || ty > cy1 {
+				for i := 1; i < len(row); i += 2 {
+					row[i]++
+				}
+				continue
+			}
+			for i, tx := 1, tx0; i < len(row); i, tx = i+2, tx+1 {
+				if tx >= cx0 && tx <= cx1 {
+					row[i] = 1
+					cover[base+tx] = uint32(k) + 1
+				} else {
+					row[i]++
+				}
 			}
 		}
 	}
@@ -57,18 +86,43 @@ func (l *List) Bin(spans, list []uint32) ([]uint32, []uint32, error) {
 	for t := range across * down {
 		spans[2*t], first, spans[2*t+1] = first, first+spans[2*t+1], 0
 	}
-	list = append(list[:0], make([]uint32, total)...)
+	list = append(list[:0], make([]uint32, first)...)
 	for k := range l.instances {
 		x0, y0, x1, y1 := box(&l.instances[k])
+		tx0, tx1 := x0/Tile, (x1-1)/Tile+1
 		for ty := y0 / Tile; ty <= (y1-1)/Tile; ty++ {
-			row := spans[2*(ty*across+x0/Tile) : 2*(ty*across+(x1-1)/Tile+1)]
-			for i := 0; i < len(row); i += 2 {
+			base := ty * across
+			row := spans[2*(base+tx0) : 2*(base+tx1)]
+			hidden := cover[base+tx0 : base+tx1]
+			for i, j := 0, 0; i < len(row); i, j = i+2, j+1 {
+				if uint32(k)+1 < hidden[j] {
+					continue // a later instance hides this tile
+				}
 				list[row[i]+row[i+1]] = uint32(k)
 				row[i+1]++
 			}
 		}
 	}
 	return spans, list, nil
+}
+
+// hides reports whether an instance sets every pixel of its box to one
+// colour regardless of what lies beneath: an opaque fill with square
+// corners (Coverage 1 everywhere, and blend overwrites at alpha 255).
+func hides(in *Instance) bool {
+	return in.Kind == KindFill && in.Radius <= 0 && in.Color>>24 == 0xFF
+}
+
+// wholeTiles returns the first and last tile, along an axis of n pixels,
+// that the pixels [p0, p1) cover entirely; last < first when there are
+// none. The last tile of the axis ends at the surface edge, not at a
+// multiple of Tile.
+func wholeTiles(p0, p1, n int) (first, last int) {
+	first, last = (p0+Tile-1)/Tile, p1/Tile-1
+	if p1 == n {
+		last = (n - 1) / Tile
+	}
+	return first, last
 }
 
 // box is an instance's drawable box: its rectangle cut by its clip. A list

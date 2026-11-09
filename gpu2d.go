@@ -98,6 +98,10 @@ type List struct {
 	offsets   [][2]int
 	data      []byte
 	err       error
+	// cover is Bin's scratch: per tile, one more than the index of the last
+	// instance that hides the tile entirely (0: none). Kept between frames
+	// so binning allocates nothing in steady state.
+	cover []uint32
 }
 
 // NewList starts a frame for a w × h surface. A side below zero or above
