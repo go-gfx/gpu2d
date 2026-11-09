@@ -1,3 +1,8 @@
+//go:build darwin
+
+// Metal exists only on macOS, and Getrusage is not in syscall on js/wasm or
+// Windows.
+
 package metal
 
 import (
