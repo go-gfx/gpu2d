@@ -5,7 +5,9 @@
 // Package webgpu draws a gpu2d list with WebGPU in the browser
 // (GOOS=js GOARCH=wasm), through go-gfx/webgpu. One quad per instance, the
 // coverage of gpu2d.Coverage in the fragment shader, fixed-function blending;
-// the result matches gpu2d's CPU reference within 1 per channel.
+// the result matches gpu2d's CPU reference within 1 per channel. NewCompute
+// draws with the compute kernel gpu2d.KernelWGSL instead, byte-identical to
+// the reference over any ground.
 package webgpu
 
 import _ "embed"

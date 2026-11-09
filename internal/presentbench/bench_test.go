@@ -98,8 +98,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// frameTime loads the page for one format and returns its time per frame.
-func frameTime(b *testing.B, format string) float64 {
+// frameTime loads the page with a query string (format=, mode=, w=, h=) and
+// returns its time per frame.
+func frameTime(b *testing.B, query string) float64 {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.Flag("disable-gpu", false),
@@ -123,7 +124,7 @@ func frameTime(b *testing.B, format string) float64 {
 	defer cancel2()
 	ctx, cancel3 := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel3()
-	if _, err := chromedp.Run(ctx, chromedp.Navigate(site+"/?format="+format)); err != nil {
+	if _, err := chromedp.Run(ctx, chromedp.Navigate(site+"/?"+query)); err != nil {
 		b.Skipf("no Chrome: %v", err)
 	}
 	for deadline := time.Now().Add(100 * time.Second); ; time.Sleep(100 * time.Millisecond) {
@@ -150,10 +151,37 @@ func BenchmarkPresent(b *testing.B) {
 			var total float64
 			n := 0
 			for b.Loop() {
-				total += frameTime(b, format)
+				total += frameTime(b, "format="+format)
 				n++
 			}
 			b.ReportMetric(total/float64(n), "ns/frame")
 		})
+	}
+}
+
+// BenchmarkRaster compares the fixed-function renderer with the compute
+// kernel on the shared widget frame, Draw plus Present into a bgra8unorm
+// canvas, the format macOS prefers. Interleave the two with abbench:
+//
+//	go test -c -o presentbench.test .
+//	abbench --base presentbench.test --head presentbench.test --max-load 8 \
+//	    --base-arg=-test.bench=Raster/4K/fixed --head-arg=-test.bench=Raster/4K/compute \
+//	    --rename-base fixed=mode --rename-head compute=mode -- -test.run '^$' -test.benchtime 3x
+func BenchmarkRaster(b *testing.B) {
+	for _, s := range []struct {
+		name string
+		w, h int
+	}{{"1080p", 1920, 1080}, {"4K", 3840, 2160}, {"gallery", 960, 2834}} {
+		for _, mode := range []string{"fixed", "compute"} {
+			b.Run(s.name+"/"+mode, func(b *testing.B) {
+				var total float64
+				n := 0
+				for b.Loop() {
+					total += frameTime(b, fmt.Sprintf("format=bgra&mode=%s&w=%d&h=%d", mode, s.w, s.h))
+					n++
+				}
+				b.ReportMetric(total/float64(n), "ns/frame")
+			})
+		}
 	}
 }

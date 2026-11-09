@@ -96,6 +96,30 @@ the WGSL, validated on every platform by go-gfx/wgsl before a browser sees it.
 `TestMatchesReference` runs in a real Chromium worker: on a GPU on macOS in CI,
 on SwiftShader on Linux.
 
+### Compute mode (`NewCompute`)
+
+```go
+r, err := gpu2dwebgpu.NewCompute(ctx, device, w, h) // same Draw, Present, Read
+```
+
+`kernel.wgsl` (`gpu2d.KernelWGSL`) is the whole raster kernel as one WGSL
+compute shader: the tile walk over `List.Bin`'s output, the coverage functions
+of `shader.wgsl` (a test keeps them character-identical) and PixelPainter's
+integer blend, floored alpha included. It is the arithmetic of the Metal
+kernel, so a frame is **byte-identical to `Rasterize` over any ground**, where
+the fixed-function renderer differs by up to 4 in alpha over a translucent one.
+It binds four storage buffers (instances, bins = spans then list, arena,
+pixels) and one uniform, and runs in 16 × 8 workgroups, the limits
+[docs/NATIVE.md](docs/NATIVE.md) sets so that other back-ends can emit it.
+
+The pixels live in a storage buffer: `Texture()` is nil, and `Present`
+(either canvas format, from the buffer) and `Read` keep their contracts.
+`TestComputeMatchesReference` reports 0 differing channels on an opaque and a
+translucent ground, and `TestComputeBreakCheck` perturbs the blend and shows
+the same comparison failing. The default stays the fixed-function renderer;
+`internal/presentbench`'s `BenchmarkRaster` measures the two on the same
+frames.
+
 To put the frame on a `<canvas>` without reading it back, configure the
 canvas's surface with `CanvasDescriptor()` and present after each draw:
 

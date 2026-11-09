@@ -170,22 +170,27 @@ func BenchmarkWidgetFrame(b *testing.B) {
 	}{{"1080p", 1920, 1080}, {"4K", 3840, 2160}} {
 		l, _ := gpu2d.NewList(s.w, s.h)
 		gpu2d.WidgetFrame(l)
-		b.Run("gpu/"+s.name, func(b *testing.B) {
-			d, ctx := benchDevice(b)
-			r, err := New(ctx, d, s.w, s.h)
-			if err != nil {
-				b.Fatal(err)
-			}
-			b.ReportMetric(float64(len(l.Instances())), "instances")
-			for b.Loop() {
-				if err := r.Draw(l, nil); err != nil {
+		for _, m := range []struct {
+			name string
+			new  func(context.Context, *wg.Device, int, int) (*Renderer, error)
+		}{{"gpu", New}, {"compute", NewCompute}} {
+			b.Run(m.name+"/"+s.name, func(b *testing.B) {
+				d, ctx := benchDevice(b)
+				r, err := m.new(ctx, d, s.w, s.h)
+				if err != nil {
 					b.Fatal(err)
 				}
-				if err := d.Queue().OnSubmittedWorkDone(ctx); err != nil {
-					b.Fatal(err)
+				b.ReportMetric(float64(len(l.Instances())), "instances")
+				for b.Loop() {
+					if err := r.Draw(l, nil); err != nil {
+						b.Fatal(err)
+					}
+					if err := d.Queue().OnSubmittedWorkDone(ctx); err != nil {
+						b.Fatal(err)
+					}
 				}
-			}
-		})
+			})
+		}
 		b.Run("cpu-wasm/"+s.name, func(b *testing.B) {
 			buf := make([]byte, 4*s.w*s.h)
 			for b.Loop() {
