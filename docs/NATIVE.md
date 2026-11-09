@@ -543,7 +543,30 @@ the maximum difference and the count of differing channels.
 6. **Windows hardware behaviour** (a UAV back buffer, driver numerics) cannot
    be observed at all before a GPU machine is available.
 
-## Questions for the user
+## Decisions taken (2026-11-09)
+
+The user answered questions 1–4 below:
+1. **Windows:** the D3D11 back-end ships **opt-in** (`Config.GPU`, as on
+   macOS), its identity proven on WARP in CI, falling back to the CPU on any
+   failure. Real Windows GPUs stay unproven until someone runs the suite on
+   one.
+2. **Native validators as CI oracles only:** spirv-val (SPIRV-Tools) and
+   lavapipe may run in CI. Nothing shipped or run at run time depends on
+   them.
+3. **Measured identity is accepted:** `Rasterize` stays the oracle. Each
+   GPU's identity is a parity measurement; a GPU that disagrees falls back
+   to the CPU and is named by the test.
+4. **WebGPU compute (K0) replaces the fixed-function path if it is not
+   slower,** measured on the M4 Max and on fractal's W7700. Otherwise it
+   stays an option.
+
+Taken as proposed, open to objection:
+5. **Repository homes:** `go-gfx/vulkan` and `go-mswin/d3d11` (with
+   `dxgi`). Moving screencapture onto `dxgi` is left for later.
+6. **External reference:** cairo's image back-end joins the CPU path as the
+   C reference in the G1 and D3 benchmarks.
+
+## Questions for the user (as asked)
 
 1. **Windows hardware.** Is there a Windows machine with a real GPU, or can
    one be offered as a self-hosted runner? Without one, should the D3D11 path
