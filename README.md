@@ -168,6 +168,18 @@ and `Close` waits for what is in flight before releasing memory.
 `List`, `Bin` and `AppendBytes` allocate nothing in steady state
 (`TestSteadyFrameAllocatesNothing`).
 
+`Submit`'s cost is almost all CPU-side packing: binning and copying the list
+into the slot. Encoding and Metal's commit add about 14 µs. Since v0.6.1,
+binning runs in plain loops rather than a callback per (instance, tile) pair.
+Measured on an M4 Max, 8 interleaved rounds at a 1-minute load of at most 8
+(`BenchmarkBin`, `BenchmarkSubmit`):
+
+| | v0.6.0 | v0.6.1 |
+|---|---:|---:|
+| `Bin`, 960 × 2834 widget frame | 148.0 µs | 48.3 µs |
+| `Submit`, `WidgetFrame` at 1920 × 1080 | 164.9 µs | 81.9 µs |
+| `Submit`, `WidgetFrame` at 1920 × 5668 | 782.9 µs | 370.9 µs |
+
 To put the frame on screen without the CPU touching it, present to a
 CAMetalLayer that a view hosts:
 
