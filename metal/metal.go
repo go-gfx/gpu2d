@@ -15,6 +15,7 @@ package metal
 
 import (
 	_ "embed"
+	"encoding/binary"
 	"errors"
 
 	"github.com/go-gfx/gpu2d"
@@ -294,8 +295,9 @@ func (r *Renderer) InFlight() int { return r.n }
 
 // putWords writes ws into b as little-endian 32-bit words.
 func putWords(b []byte, ws []uint32) {
+	b = b[:4*len(ws)] // one bounds check here instead of four per word
 	for i, v := range ws {
-		b[4*i], b[4*i+1], b[4*i+2], b[4*i+3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+		binary.LittleEndian.PutUint32(b[4*i:], v)
 	}
 }
 
