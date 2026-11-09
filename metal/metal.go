@@ -17,6 +17,7 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"errors"
+	"unsafe"
 
 	"github.com/go-gfx/gpu2d"
 	mtl "github.com/go-macos/metal"
@@ -58,7 +59,6 @@ const slots = 2
 type slot struct {
 	inst, spans, list, data *mtl.Buffer
 	bytes                   []byte
-	spanIdx, listIdx        []uint32
 	pend                    *mtl.Pending
 }
 
@@ -251,18 +251,22 @@ func (r *Renderer) pack(l *gpu2d.List) (*slot, frame, error) {
 		return nil, frame{}, ErrSize
 	}
 	s := &r.slot[(r.head+r.n)%slots]
-	var err error
-	if s.spanIdx, s.listIdx, err = l.Bin(s.spanIdx, s.listIdx); err != nil {
+	// Bin straight into the slot's buffers, which no frame in flight reads.
+	// Bin reuses the storage it is given when it is large enough, so the
+	// indices land in GPU memory with no copy; place copies only after Bin
+	// had to grow past a buffer, and the grown buffer is reused afterwards.
+	spans, list, err := l.Bin(words(s.spans), words(s.list))
+	if err != nil {
+		return nil, frame{}, err
+	}
+	if s.spans, err = r.place(s.spans, spans); err != nil {
+		return nil, frame{}, err
+	}
+	if s.list, err = r.place(s.list, list); err != nil {
 		return nil, frame{}, err
 	}
 	s.bytes = gpu2d.AppendBytes(s.bytes[:0], l.Instances())
 	if s.inst, err = r.fit(s.inst, len(s.bytes)); err != nil {
-		return nil, frame{}, err
-	}
-	if s.spans, err = r.fit(s.spans, 4*len(s.spanIdx)); err != nil {
-		return nil, frame{}, err
-	}
-	if s.list, err = r.fit(s.list, 4*len(s.listIdx)); err != nil {
 		return nil, frame{}, err
 	}
 	if s.data, err = r.fit(s.data, len(l.Data())); err != nil {
@@ -270,8 +274,6 @@ func (r *Renderer) pack(l *gpu2d.List) (*slot, frame, error) {
 	}
 	copy(s.data.Bytes(), l.Data())
 	copy(s.inst.Bytes(), s.bytes)
-	putWords(s.spans.Bytes(), s.spanIdx)
-	putWords(s.list.Bytes(), s.listIdx)
 	across, _ := l.Tiles()
 	return s, frame{W: uint32(r.w), H: uint32(r.h), Across: uint32(across), Tile: gpu2d.Tile}, nil
 }
@@ -292,6 +294,31 @@ func (r *Renderer) Wait() error {
 
 // InFlight is the number of submitted frames not yet waited for.
 func (r *Renderer) InFlight() int { return r.n }
+
+// words views a buffer's memory as 32-bit words, nil for no buffer. They are
+// in the host's byte order, which is the GPU's: Metal runs only on
+// little-endian Macs. A Metal buffer is page-aligned, so the view is too.
+func words(b *mtl.Buffer) []uint32 {
+	if b == nil {
+		return nil
+	}
+	m := b.Bytes()
+	return unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(m))), len(m)/4)
+}
+
+// place makes buf hold ws. When ws already lives in buf (Bin reused it)
+// there is nothing to do; otherwise buf grows to fit and ws is copied in.
+func (r *Renderer) place(buf *mtl.Buffer, ws []uint32) (*mtl.Buffer, error) {
+	if v := words(buf); len(ws) > 0 && len(v) > 0 && &v[0] == &ws[0] {
+		return buf, nil
+	}
+	buf, err := r.fit(buf, 4*len(ws))
+	if err != nil {
+		return nil, err
+	}
+	putWords(buf.Bytes(), ws)
+	return buf, nil
+}
 
 // putWords writes ws into b as little-endian 32-bit words.
 func putWords(b []byte, ws []uint32) {
