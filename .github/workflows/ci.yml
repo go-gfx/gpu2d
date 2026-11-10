@@ -80,6 +80,34 @@ jobs:
           VULKAN_REQUIRE: "1"
         run: go test -count=1 -run '^$' -bench . -benchtime 1x ./vulkan
 
+  # The Direct3D 11 kernel: kernel_gen.hlsl is checked on every platform; the DXBC
+  # can only be made by D3DCompile, so this lane recompiles it and compares with
+  # the committed kernel_gen.dxbc, with no tolerance. Its failure message names
+  # the compiler DLL version of both sides and how to regenerate; the artifact
+  # "dxbc" holds the fresh files (kernel_gen.dxbc and kernel_gen.dxbc.record). No
+  # GPU is involved.
+  d3d11:
+    name: d3d11 (windows, WARP)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: vet
+        run: go vet ./d3d11/... ./internal/hlslgen/...
+      - name: DXBC drift test
+        env:
+          D3D11_DXBC_OUT: ${{ runner.temp }}\dxbc
+        run: go test -count=1 -v ./d3d11/... ./internal/hlslgen/...
+      - name: fresh DXBC
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxbc
+          path: ${{ runner.temp }}\dxbc
+          if-no-files-found: warn
+
   linux-386:
     runs-on: ubuntu-latest
     steps:
