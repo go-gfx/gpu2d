@@ -5,6 +5,7 @@
 package vulkan
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -28,9 +29,12 @@ import (
 //	VULKAN_VENDOR=0x1002 only a device of this PCI vendor
 
 // renderer returns a renderer, or skips where there is no Vulkan device.
-func renderer(tb testing.TB, w, h int) *Renderer {
+func renderer(tb testing.TB, w, h int) *Renderer { return rendererRTE(tb, w, h, false) }
+
+// rendererRTE is renderer, with the kernel without RoundingModeRTE when noRTE.
+func rendererRTE(tb testing.TB, w, h int, noRTE bool) *Renderer {
 	tb.Helper()
-	o := Options{Validation: os.Getenv("VULKAN_VALIDATION") == "1"}
+	o := Options{Validation: os.Getenv("VULKAN_VALIDATION") == "1", NoRTE: noRTE}
 	if v := os.Getenv("VULKAN_VENDOR"); v != "" {
 		id, err := strconv.ParseUint(v, 0, 32)
 		if err != nil {
@@ -125,14 +129,26 @@ func parity(t *testing.T, r *Renderer, w, h, seeds int) (worst, differing int) {
 // over an opaque and a translucent ground. The blend is the reference's
 // integer arithmetic, and the coverage is f32 against f64: the bar is zero
 // differing channels, as on Metal. A device that misses it is named here.
+//
+// It runs twice: the kernel with RoundingModeRTE declared, which the renderer
+// picks on a device that reports it, and the plain one, which it picks
+// elsewhere. Both must be exact.
 func TestMatchesReference(t *testing.T) {
 	const w, h, seeds = 64, 48, 300
-	r := renderer(t, w, h)
-	i := r.Info()
-	t.Logf("device %q type=%v vendor=%#x api=%v driver=%q %q", i.Name, i.Type, i.VendorID, i.APIVersion, i.DriverName, i.DriverInfo)
-	worst, differing := parity(t, r, w, h, seeds)
-	if worst != 0 {
-		t.Fatalf("%s: max |Δ| %d, %d channels differ from Rasterize", i.Name, worst, differing)
+	for _, noRTE := range []bool{false, true} {
+		r := rendererRTE(t, w, h, noRTE)
+		i := r.Info()
+		t.Logf("device %q type=%v vendor=%#x api=%v driver=%q %q; RoundingModeRTE offered %v, kernel declares it %v; robustBufferAccess %v",
+			i.Name, i.Type, i.VendorID, i.APIVersion, i.DriverName, i.DriverInfo,
+			i.RoundingModeRTEFloat32, r.RoundingModeRTE(), r.RobustBufferAccess())
+		if want := i.RoundingModeRTEFloat32 && !noRTE; r.RoundingModeRTE() != want {
+			t.Fatalf("noRTE=%v, offered %v, but the kernel declares RoundingModeRTE=%v", noRTE, i.RoundingModeRTEFloat32, r.RoundingModeRTE())
+		}
+		worst, differing := parity(t, r, w, h, seeds)
+		if worst != 0 {
+			t.Fatalf("%s (RTE %v): max |Δ| %d, %d channels differ from Rasterize", i.Name, r.RoundingModeRTE(), worst, differing)
+		}
+		r.Close()
 	}
 }
 
@@ -143,12 +159,17 @@ func TestBreakCheckPerturbedBlend(t *testing.T) {
 	if !strings.Contains(gpu2d.KernelWGSL, old) {
 		t.Fatal("kernel.wgsl no longer has the blend line this check perturbs")
 	}
-	spv, err := spirvgen.Kernel(strings.Replace(gpu2d.KernelWGSL, old, "(sr * ca + dst.x * ia + 100u) / 255u", 1))
+	bad := strings.Replace(gpu2d.KernelWGSL, old, "(sr * ca + dst.x * ia + 100u) / 255u", 1)
+	plain, err := spirvgen.Kernel(bad, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func(k []byte) { kernel = k }(kernel)
-	kernel = spv
+	rte, err := spirvgen.Kernel(bad, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func(k struct{ plain, rte []byte }) { kernels = k }(kernels)
+	kernels = struct{ plain, rte []byte }{plain, rte}
 	const w, h = 64, 48
 	r := renderer(t, w, h)
 	worst, differing := parity(t, r, w, h, 60)
@@ -350,6 +371,61 @@ func TestTwoFramesInFlightCompositeInOrder(t *testing.T) {
 				t.Fatalf("round %d channel %d: CPU %d, GPU %d", round, i, want[i], got[i])
 			}
 		}
+	}
+}
+
+// TestFramesReallyOverlap: Submit of the second frame returns while the first
+// is still running on the device (its fence is not signalled), Submit does not
+// wait on a fence, and the composite is still the CPU's, byte for byte. The
+// frames are large enough that the device takes far longer than a Submit.
+func TestFramesReallyOverlap(t *testing.T) {
+	const w, h = 1920, 2834
+	r := renderer(t, w, h)
+	a, _ := gpu2d.NewList(w, h)
+	gpu2d.WidgetFrame(a)
+	b := translucent(w, h, 40)
+	ground := make([]byte, 4*w*h)
+	for i := range ground {
+		ground[i] = uint8(i*5 + i>>9)
+	}
+	want := append([]byte(nil), ground...)
+	if err := a.Rasterize(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Rasterize(want); err != nil {
+		t.Fatal(err)
+	}
+	overlapped := 0
+	const rounds = 5
+	for round := range rounds {
+		copy(r.Pixels(), ground)
+		if err := r.Submit(a); err != nil {
+			t.Fatal(err)
+		}
+		t0 := time.Now()
+		if err := r.Submit(b); err != nil {
+			t.Fatal(err)
+		}
+		took := time.Since(t0)
+		done, err := r.slot[r.head].fence.Done()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !done {
+			overlapped++
+		}
+		t.Logf("round %d: Submit of the second frame took %v; the first still running: %v", round, took, !done)
+		for range 2 {
+			if err := r.Wait(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !bytes.Equal(r.Pixels(), want) {
+			t.Fatalf("round %d: the overlapped frames are not the CPU's composite", round)
+		}
+	}
+	if overlapped == 0 {
+		t.Fatal("the first frame had always finished when the second was submitted: nothing overlapped")
 	}
 }
 

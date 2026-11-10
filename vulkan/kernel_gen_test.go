@@ -12,15 +12,24 @@ import (
 	"github.com/go-gfx/gpu2d/internal/spirvgen"
 )
 
-// kernel_gen.spv is what kernel.wgsl generates today: a change to the WGSL
-// that was not regenerated (go generate ./vulkan) fails here, on every
-// platform and with no GPU, before the back-ends can disagree.
+// kernel_gen.spv and kernel_rte_gen.spv are what kernel.wgsl generates today:
+// a change to the WGSL that was not regenerated (go generate ./vulkan) fails
+// here, on every platform and with no GPU, before the back-ends can disagree.
 func TestKernelSPIRVIsGenerated(t *testing.T) {
-	want, err := spirvgen.Kernel(gpu2d.KernelWGSL)
-	if err != nil {
-		t.Fatal(err)
+	for _, c := range []struct {
+		name string
+		rte  bool
+		have []byte
+	}{{"kernel_gen.spv", false, KernelSPV}, {"kernel_rte_gen.spv", true, KernelRTESPV}} {
+		want, err := spirvgen.Kernel(gpu2d.KernelWGSL, c.rte)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(c.have, want) {
+			t.Fatalf("vulkan/%s is stale: run go generate ./vulkan", c.name)
+		}
 	}
-	if !bytes.Equal(KernelSPV, want) {
-		t.Fatal("vulkan/kernel_gen.spv is stale: run go generate ./vulkan")
+	if bytes.Equal(KernelSPV, KernelRTESPV) {
+		t.Fatal("the RoundingModeRTE module is the plain one")
 	}
 }

@@ -43,9 +43,19 @@ import (
 //go:embed kernel_gen.spv
 var KernelSPV []byte
 
-// kernel is the module New builds the pipeline from: KernelSPV, except in the
-// break check, which swaps in a kernel with its blend perturbed.
-var kernel = KernelSPV
+// KernelRTESPV is KernelSPV with the RoundingModeRTE execution mode declared
+// for 32-bit floats, so that + - * are correctly rounded and the f32 coverage
+// is the same on every device that has it. The renderer runs it on a device
+// that reports shaderRoundingModeRTEFloat32 (a module may declare the mode only
+// there: VUID-RuntimeSpirv-shaderRoundingModeRTEFloat32-06303), and KernelSPV
+// elsewhere; both keep NoContraction.
+//
+//go:embed kernel_rte_gen.spv
+var KernelRTESPV []byte
+
+// kernels are the modules New builds the pipeline from, except in the break
+// check, which swaps in kernels with the blend perturbed.
+var kernels = struct{ plain, rte []byte }{KernelSPV, KernelRTESPV}
 
 // ErrUnsupported is go-gfx/vulkan's: no Vulkan loader, or a platform without
 // the binding.
@@ -108,6 +118,9 @@ type Options struct {
 	// Filter narrows the choice of physical device; the zero Filter takes the
 	// best one (discrete, integrated, ..., software).
 	Filter vk.Filter
+	// NoRTE runs the kernel without RoundingModeRTE even on a device that
+	// reports it (the tests run both).
+	NoRTE bool
 }
 
 // Renderer draws lists into a w × h RGBA frame in host-visible memory.
@@ -122,8 +135,9 @@ type Renderer struct {
 	w, h   int
 	target *vk.Buffer
 	slot   [slots]slot
-	head   int // the oldest frame in flight
-	n      int // frames in flight
+	rte    bool // the kernel declares RoundingModeRTE
+	head   int  // the oldest frame in flight
+	n      int  // frames in flight
 	closed bool
 }
 
@@ -157,6 +171,10 @@ func NewWith(w, h int, o Options) (*Renderer, error) {
 	if err = r.check(w, h); err != nil {
 		r.Close()
 		return nil, err
+	}
+	kernel := kernels.plain
+	if r.info.RoundingModeRTEFloat32 && !o.NoRTE {
+		kernel, r.rte = kernels.rte, true
 	}
 	if len(kernel)%4 != 0 {
 		r.Close()
@@ -227,6 +245,15 @@ func (r *Renderer) Name() string { return r.info.Name }
 // Info describes the physical device the renderer runs on.
 func (r *Renderer) Info() vk.DeviceInfo { return r.info }
 
+// RoundingModeRTE reports whether the kernel runs with RoundingModeRTE
+// declared: true on a device that reports shaderRoundingModeRTEFloat32.
+func (r *Renderer) RoundingModeRTE() bool { return r.rte }
+
+// RobustBufferAccess reports whether the device was created with
+// robustBufferAccess enabled, which go-gfx/vulkan does whenever it is offered:
+// the second line of defence behind the kernel's in-range indices.
+func (r *Renderer) RobustBufferAccess() bool { return r.dev.RobustBufferAccess() }
+
 // Pixels is the frame, 4·w·h bytes of RGBA rows top to bottom. It is the
 // memory the device draws into: write the ground here before Draw and read the
 // result here after it.
@@ -278,11 +305,13 @@ func (r *Renderer) Draw(l *gpu2d.List) error {
 // each compositing over the previous one's result. At most two frames are in
 // flight; a third Submit is ErrBusy.
 //
-// Because every frame composites over the previous frame's pixels, frames
-// cannot overlap on the device. The second frame is packed while the first
-// runs; the queue submission of the second waits until the first has
-// finished (go-gfx/vulkan v0.1.0 records no barrier between submissions, so
-// order is established on the host).
+// Every frame composites over the previous frame's pixels, so the device
+// runs them one after the other, but both are queued: the second frame is
+// packed and submitted while the first runs, and Submit never waits on a
+// fence. The order is the device's: each command buffer begins with a
+// go-gfx/vulkan Barrier (a memory dependency from the earlier writes, in
+// submission order, to this frame's reads and writes of the pixels), so the
+// second dispatch starts only when the first's writes are visible.
 //
 // The frame's memory (Pixels) belongs to the device until Wait has returned for
 // every frame in flight: write the ground before the first Submit, read the
@@ -295,12 +324,13 @@ func (r *Renderer) Submit(l *gpu2d.List) error {
 	if err != nil {
 		return err
 	}
-	if r.n > 0 { // submission order, on the host: see above
-		if err := r.finish(&r.slot[(r.head+r.n-1)%slots]); err != nil {
-			return err
-		}
-	}
 	if err := s.cb.Begin(); err != nil {
+		return err
+	}
+	// The pixels this frame reads and writes are the previous frame's: the
+	// barrier orders this dispatch after every earlier write on the queue, a
+	// frame still running included.
+	if err := s.cb.Barrier(); err != nil {
 		return err
 	}
 	if err := s.cb.Dispatch(s.pipe, uint32((r.w+15)/16), uint32((r.h+7)/8), 1); err != nil {
