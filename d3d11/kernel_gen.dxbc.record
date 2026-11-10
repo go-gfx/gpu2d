@@ -1,0 +1,6 @@
+compiler: d3dcompiler_47.dll 10.0.26100.33648
+target: cs_5_0
+entry: raster
+flags: 0x4a000
+hlsl-sha256: d2bf865df4172320b03a7213e205edd63f10b2d6e5c7bee800159087f2a64ef4
+dxbc-sha256: 6dd613f52788cb29724043afd73167b6f10b105c18c49c955917158edb029d30
