@@ -7,11 +7,11 @@ pixel, and each GPU back-end is checked against it.
 
 **Status: milestone 4 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
 list, the CPU reference, the WebGPU back-end (package `webgpu`, browser) and
-the Metal back-end (package `metal`, macOS) and the Vulkan back-end (package
-`vulkan`, Linux, proven on lavapipe) exist, for rectangles, glyph masks,
-images and paths. The go-widgets adapter comes next. Presentation on Linux and
-Windows (Direct3D 11) are designed, not built:
-[docs/NATIVE.md](docs/NATIVE.md).
+the Metal back-end (package `metal`, macOS), the Vulkan back-end (package
+`vulkan`, Linux, proven on lavapipe) and the Direct3D 11 back-end (package
+`d3d11`, Windows, opt-in, proven on WARP only) exist, for rectangles, glyph
+masks, images and paths. The go-widgets adapter comes next. Presentation on
+Linux and Windows is designed, not built: [docs/NATIVE.md](docs/NATIVE.md).
 
 ## Measured
 
@@ -284,6 +284,53 @@ pixels in order. The frames still run one after the other on the device, since
 each needs the other's pixels. On a device that reports
 `shaderRoundingModeRTEFloat32` the kernel declares `RoundingModeRTE`
 (`kernel_rte_gen.spv`); `robustBufferAccess` is enabled where offered.
+
+## Direct3D 11 (package `d3d11`, Windows, opt-in)
+
+```go
+r, err := d3d11.New(w, h) // errors.Is(err, d3d11.ErrUnsupported) off Windows
+copy(r.Pixels(), ground)
+err = r.Draw(list)        // Submit, then Wait; r.Pixels() holds the frame
+```
+
+The same shape as `metal` and `vulkan`: `New(w, h)` (and `NewWith`, whose
+`Options.Software` asks for WARP), `Draw`, `Submit` and `Wait` over two slots,
+`Pixels`, `Resize`, `Close`, `Name`, and `ErrBusy`, `ErrNothingInFlight`,
+`ErrSize`, `ErrUnsupported` and `ErrNoDevice`. It runs the same raster kernel
+through go-mswin/d3d11 (pure Go, COM through syscall, no cgo):
+`d3d11/kernel_gen.hlsl` is generated from `kernel.wgsl` (`go generate ./d3d11`)
+and `d3d11/kernel_gen.dxbc` is that HLSL compiled by `D3DCompile` on the Windows
+lane and committed, with a record of the compiler and hashes; nothing is
+compiled at run time. Off Windows the constructors return `ErrUnsupported`.
+
+**It ships opt-in, and only WARP has run it.** CI runs the package on WARP, the
+software device of a `windows-latest` runner; no Windows GPU has. Parity with
+`Rasterize` on WARP is a measurement of WARP's arithmetic, not a proof for any
+GPU: a device that disagrees is to be named by `TestMatchesReference`, and the
+window falls back to the CPU.
+
+Direct3D 11 has no persistently mapped, GPU-writable buffer, so `Pixels` is a
+host copy and `Draw` pays for two copies that Metal and Vulkan do not:
+
+- **Upload.** Each slot keeps its instance, bins and arena buffers across frames
+  (DYNAMIC structured buffers written with `Map` `WRITE_DISCARD`, grown on
+  demand, go-mswin/d3d11 v0.2.0), and, when nothing is in flight, the target is
+  filled in place from `Pixels` with `UpdateSubresource` (the caller may have
+  written the ground there).
+- **Read-back.** The `Wait` that ends the last frame copies the target to a
+  staging buffer, maps it and copies it into `Pixels`.
+
+Frames queued with `Submit` stay on the device between them: the second
+composites over the first's result with no read-back, in submission order on the
+one immediate context. Each frame is flushed and fenced, so `Wait` of the first
+of two returns when that frame is done. `Renderer.Stats` splits the wall time into packing,
+target upload, device time and read-back; docs/NATIVE.md has the measured split.
+
+A frame past the device's buffer limit (guaranteed `min(max(128, 0.25 · VRAM),
+2048)` MB, 128 MiB on WARP, so a square frame above 5792 pixels) or past 65535
+thread groups per dimension is refused with `gpu2d.ErrTooLarge`, as is a frame
+whose input buffers would pass it. The tests honour `D3D11_REQUIRE=1` and
+`D3D11_HARDWARE=1`.
 
 ## Bounds
 
