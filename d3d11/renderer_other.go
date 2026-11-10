@@ -53,3 +53,27 @@ func (*Renderer) ResetStats() {}
 
 // Close does nothing.
 func (*Renderer) Close() {}
+
+// SwapChain is a swap chain on a window. Off Windows none can be made.
+type SwapChain struct {
+	// Vsync is the Windows field of the same name.
+	Vsync bool
+}
+
+// NewSwapChain returns ErrUnsupported.
+func (*Renderer) NewSwapChain(uintptr) (*SwapChain, error) { return nil, ErrUnsupported }
+
+// Size is 0 × 0.
+func (*SwapChain) Size() (w, h int) { return 0, 0 }
+
+// Resize returns ErrUnsupported.
+func (*SwapChain) Resize(int, int) error { return ErrUnsupported }
+
+// Close does nothing.
+func (*SwapChain) Close() {}
+
+// Present returns ErrUnsupported.
+func (*Renderer) Present(*gpu2d.List, *SwapChain) error { return ErrUnsupported }
+
+// PresentAndRead returns ErrUnsupported.
+func (*Renderer) PresentAndRead(*gpu2d.List, *SwapChain, []byte) error { return ErrUnsupported }

@@ -332,6 +332,23 @@ thread groups per dimension is refused with `gpu2d.ErrTooLarge`, as is a frame
 whose input buffers would pass it. The tests honour `D3D11_REQUIRE=1` and
 `D3D11_HARDWARE=1`.
 
+**Presenting** (v0.11.0): `r.NewSwapChain(hwnd)` makes a flip-model swap chain
+(`FLIP_DISCARD`, `R8G8B8A8_UNORM`, two buffers, back buffers usable as UAVs;
+go-mswin/d3d11 v0.3.0) on a window, and `r.Present(list, sc)` draws the list over
+the device's frame, copies the frame into the back buffer with a second,
+hand-written kernel (`d3d11/present.hlsl`, `present.dxbc` made on the Windows
+lane and committed, as the raster kernel's is) and presents it. Nothing is
+uploaded or read back: `Pixels` is neither read nor updated by `Present`, and the
+list draws over the frame the last `Draw` or `Present` left on the device.
+`PresentAndRead` also copies the back buffer, just before the swap chain's
+`Present`, into a slice: the proof that the window gets the frame, and a
+screenshot that needs no desktop. The swap chain is sized as the frame
+(`SwapChain.Resize` after `Renderer.Resize`); close it before the renderer. A
+window with GDI-blitted pixels shows only the swap chain while it exists (flip
+model). CI proves it on WARP with a hidden window: the back buffer equals
+`Rasterize` on an opaque and a translucent ground, and a present kernel with
+red and blue swapped is caught.
+
 ## Bounds
 
 Every coordinate a list records, translation included, lies within ±2^24

@@ -77,7 +77,10 @@ type Renderer struct {
 	pix    []byte     // the host copy of the frame: what Pixels returns
 	target *dx.Buffer // the device's frame (DEFAULT usage, UAV), filled from pix when nothing is in flight
 	uav    *dx.UAV
-	stage  *dx.Buffer // CPU-readable copy of the target
+	tsrv   *dx.SRV           // the target as Present's input
+	psh    *dx.ComputeShader // Present's kernel, made on the first Present
+	pcb    *dx.Buffer        // its constants {w, h}
+	stage  *dx.Buffer        // CPU-readable copy of the target
 	slot   [slots]slot
 	head   int // the oldest frame in flight
 	n      int // frames in flight
@@ -155,7 +158,9 @@ func (r *Renderer) alloc(w, h int) error {
 	if err != nil {
 		return tooLarge(err)
 	}
-	t, err := r.dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindStructured, Size: size, Stride: 4, UAV: true})
+	// SRV as well as UAV: the raster kernel writes the target through the UAV,
+	// and Present's kernel reads it through the SRV (never both bound at once).
+	t, err := r.dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindStructured, Size: size, Stride: 4, SRV: true, UAV: true})
 	if err != nil {
 		st.Close()
 		return tooLarge(err)
@@ -166,15 +171,26 @@ func (r *Renderer) alloc(w, h int) error {
 		t.Close()
 		return tooLarge(err)
 	}
+	v, err := t.SRV()
+	if err != nil {
+		st.Close()
+		u.Close()
+		t.Close()
+		return tooLarge(err)
+	}
 	r.dropTarget()
 	if r.stage != nil {
 		r.stage.Close()
 	}
-	r.stage, r.target, r.uav, r.pix, r.w, r.h = st, t, u, make([]byte, size), w, h
+	r.stage, r.target, r.uav, r.tsrv, r.pix, r.w, r.h = st, t, u, v, make([]byte, size), w, h
 	return nil
 }
 
 func (r *Renderer) dropTarget() {
+	if r.tsrv != nil {
+		r.tsrv.Close()
+		r.tsrv = nil
+	}
 	if r.uav != nil {
 		r.uav.Close()
 		r.uav = nil
@@ -312,6 +328,16 @@ func (r *Renderer) Wait() error {
 	if r.n == 0 {
 		return ErrNothingInFlight
 	}
+	if err := r.retire(); err != nil || r.n > 0 {
+		return err
+	}
+	t0 := time.Now()
+	defer func() { r.stats.Readback += time.Since(t0) }()
+	return r.readback()
+}
+
+// retire waits for the oldest frame's fence and gives its slot back.
+func (r *Renderer) retire() error {
 	s := &r.slot[r.head]
 	r.head = (r.head + 1) % slots
 	r.n--
@@ -320,15 +346,7 @@ func (r *Renderer) Wait() error {
 	s.fence = nil
 	r.stats.GPU += time.Since(s.t)
 	r.stats.Frames++
-	if err != nil {
-		return timeout(err)
-	}
-	if r.n > 0 {
-		return nil
-	}
-	t0 := time.Now()
-	defer func() { r.stats.Readback += time.Since(t0) }()
-	return r.readback()
+	return timeout(err)
 }
 
 // readback copies the target through the staging buffer into Pixels.
@@ -477,6 +495,12 @@ func (r *Renderer) Close() {
 	}
 	if r.sh != nil {
 		r.sh.Close()
+	}
+	if r.psh != nil {
+		r.psh.Close()
+	}
+	if r.pcb != nil {
+		r.pcb.Close()
 	}
 	if r.dev != nil {
 		r.dev.Close()
