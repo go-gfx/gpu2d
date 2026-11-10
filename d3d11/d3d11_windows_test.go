@@ -447,23 +447,41 @@ func TestBuffersAreReusedAndGrow(t *testing.T) {
 			t.Fatal("a frame differs from the reference")
 		}
 	}
-	check(frame(1, 40)) // slot 0
-	first := r.slot[0].in[0].buf
-	size := first.Size()
+	// Draw alternates the two slots: warm both with the same big frame.
+	check(frame(1, 40))
+	check(frame(1, 40))
+	snap := func() (b [slots]*dx.Buffer, size [slots]uint64) {
+		for i := range r.slot {
+			b[i], size[i] = r.slot[i].in[0].buf, r.slot[i].in[0].buf.Size()
+		}
+		return
+	}
+	first, sizes := snap()
 	for seed := uint64(2); seed < 12; seed++ {
-		check(frame(seed, 10)) // slot 0 again, no more than before
+		check(frame(seed, 3)) // smaller frames: nothing is recreated
 	}
-	if r.slot[0].in[0].buf != first {
-		t.Fatal("the instance buffer was recreated although it was large enough")
+	if now, _ := snap(); now != first {
+		t.Fatal("an instance buffer was recreated although it was large enough")
 	}
-	check(frame(99, 4000)) // far more instances: it must grow
-	if r.slot[0].in[0].buf == first || r.slot[0].in[0].buf.Size() <= size {
-		t.Fatalf("the instance buffer did not grow: %d then %d", size, r.slot[0].in[0].buf.Size())
+	check(frame(99, 4000)) // far more instances: one slot must grow
+	grown, after := snap()
+	changed := 0
+	for i := range grown {
+		if grown[i] != first[i] {
+			changed++
+			if after[i] <= sizes[i] {
+				t.Fatalf("slot %d: the buffer was replaced by a smaller one: %d then %d", i, sizes[i], after[i])
+			}
+		}
 	}
-	grown := r.slot[0].in[0].buf
-	check(frame(3, 10))
-	if r.slot[0].in[0].buf != grown {
-		t.Fatal("the instance buffer shrank or was recreated")
+	if changed != 1 {
+		t.Fatalf("%d slots grew, want the one that drew the big frame", changed)
+	}
+	for seed := uint64(2); seed < 6; seed++ {
+		check(frame(seed, 3))
+	}
+	if now, _ := snap(); now != grown {
+		t.Fatal("a grown buffer shrank or was recreated")
 	}
 }
 
