@@ -1004,6 +1004,74 @@ did.
   and CI pass `Options.Software` (WARP), and `D3D11_HARDWARE=1` selects the
   default adapter.
 
+### Outcomes of D4 (2026-11-10)
+
+D4 has three parts: the swap chain in go-mswin/d3d11 (v0.3.0), `Present` in
+gpu2d's `d3d11` (this repository), and `Config.GPU` on Win32 in go-widgets/window
+(its outcome is recorded below once that pull request has run).
+
+**What the Microsoft documentation says, and what it does not** (Microsoft Learn,
+opened 2026-11-10: "DXGI flip model", "For best performance, use DXGI flip model",
+`IDXGIFactory2::CreateSwapChainForHwnd`, `IDXGISwapChain::ResizeBuffers`,
+`DXGI_USAGE`, `DXGI_SWAP_CHAIN_DESC`):
+- **Formats.** A flip-model swap chain takes `R16G16B16A16_FLOAT`,
+  `B8G8R8A8_UNORM` or `R8G8B8A8_UNORM`, one sample, and at least two buffers
+  (two to sixteen). `R8G8B8A8_UNORM` is what the frame already is, so no
+  conversion is needed.
+- **`DXGI_USAGE_UNORDERED_ACCESS`** exists in the usage table. Nothing opened says
+  that a flip-model back buffer may use it: `DXGI_SWAP_CHAIN_DESC` says "the back
+  buffer can be used for shader input or render-target output". The binding asks
+  for it and reports a refusal as the error it is; **on WARP it is accepted**, the
+  UAV is created and written (`TestSwapChainBackBufferUAV`), so Present's kernel
+  writes the back buffer directly. Whether a given GPU's driver accepts a typed
+  UAV of `R8G8B8A8_UNORM` (Direct3D 11.0 requires typed stores only for R32
+  formats) is **not known**; a device that refuses gives an error at
+  `NewSwapChain`, which the window turns into its CPU path.
+- **Resize.** `ResizeBuffers` "can't resize a swap chain unless you release all
+  outstanding references to its back buffers", views and bindings included.
+  Measured on WARP: with a back buffer referenced it fails with `0x887A0001`
+  (`DXGI_ERROR_INVALID_CALL`); the binding therefore holds no back buffer between
+  calls, unbinds its views after each Present and calls `ClearState` in `Resize`.
+- **After Present** the back buffer "needs to explicitly be re-bound": `BackBuffer`
+  is asked for again (buffer 0) every frame. `FLIP_DISCARD` leaves it undefined,
+  so the read-back for the proof is made before the swap chain's Present.
+- **One flip swap chain per HWND, and nothing else may draw on it:** "only Direct3D
+  content in flip model swap chains … are visible". A window that falls back to the
+  CPU after its swap chain was made must release the swap chain (and Flush) before
+  GDI draws again.
+
+**`Present`** copies nothing between CPU and device: the raster kernel draws over
+the device's frame, then `present.hlsl` (hand-written, as `metal/present.metal`
+is, since the emitter does not write textures) copies the frame into the back
+buffer as an `RWTexture2D<unorm float4>`; `c / 255.0` stored as unorm8 rounds back
+to `c`, so the copy is byte-exact. The target is read through an SRV there and
+never bound with its UAV. `present.dxbc` is made on the Windows lane
+(`TestPresentDXBCIsCompiled` recompiles and compares, with no tolerance; the
+artifact `dxbc` holds the file) and committed; it has no record file, since the
+compiler version is the raster kernel's.
+
+**Proof on WARP** (run 42897557147, hidden window, "Microsoft Basic Render
+Driver"): the back buffer read through staging just before the swap chain's
+Present is `Rasterize`'s bytes, max |Δ| 0 and 0 channels differing over 100 random
+scenes on each of an opaque and a translucent ground. Break check: a present
+kernel with red and blue swapped, compiled in the test, gives max |Δ| 255 and
+245,376 channels differing. Two Presents in a row composite on the device;
+resize and refusals pass. go-mswin/d3d11's own tests, with a break check, show
+the same on the binding: `ResizeBuffers` fails while a back buffer is referenced.
+
+**What this document got wrong or left out.**
+- **"UAV back buffer"** was an open question in the D4 row and in risk 6; on WARP
+  the answer is yes, and the documentation neither promises nor forbids it.
+- **A second kernel and a second DXBC** are needed: the swap chain's buffer is a
+  texture, and the target stays a structured buffer, because the raster kernel's
+  bindings (and its HLSL) were generated for a buffer. `CopyResource` cannot copy a
+  buffer into a texture.
+- **`Present` does not synchronize `Pixels`.** The window never reads them; a
+  program that mixes `Draw` and `Present` must know that `Draw` uploads `Pixels`.
+- **Hidden windows present.** `Present` on a never-shown `HWND` succeeds (the
+  status `DXGI_STATUS_OCCLUDED` is a success), which is what CI runs; what the
+  compositor then shows has not been observed by anything.
+
 ## Risks
 
 1. **Biggest: identity across vendors.** The specifications permit
