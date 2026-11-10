@@ -24,6 +24,7 @@ package vulkan
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"time"
 	"unsafe"
 
@@ -135,6 +136,10 @@ func NewWith(w, h int, o Options) (*Renderer, error) {
 		return nil, gpu2d.ErrSize
 	}
 	in, err := vk.Open(vk.Options{ApplicationName: "go-gfx/gpu2d", Validation: o.Validation})
+	if errors.Is(err, vk.ErrIncompatibleDriver) {
+		// A loader with no driver behind it (a CI runner): as good as no Vulkan.
+		return nil, fmt.Errorf("%w: %w", ErrUnsupported, err)
+	}
 	if err != nil {
 		return nil, err
 	}
