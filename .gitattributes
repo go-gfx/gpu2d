@@ -12,3 +12,5 @@ vulkan/kernel_rte_gen.spv binary
 d3d11/kernel_gen.dxbc binary
 d3d11/kernel_gen.dxbc.record text eol=lf
 d3d11/kernel_gen.hlsl text eol=lf
+d3d11/present.dxbc binary
+d3d11/present.hlsl text eol=lf

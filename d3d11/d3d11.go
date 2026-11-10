@@ -63,6 +63,22 @@ var KernelDXBC []byte
 //go:embed kernel_gen.dxbc.record
 var KernelDXBCRecord string
 
+// PresentHLSL is the hand-written kernel that copies the frame into a swap
+// chain's back buffer (a typed UAV): entry point "present", a 16 x 8 thread
+// group, the frame t0, the back buffer u0, the size b0. It is hand-written, as
+// metal/present.metal is, because the emitter does not write textures.
+//
+//go:embed present.hlsl
+var PresentHLSL string
+
+// PresentDXBC is PresentHLSL compiled for cs_5_0 by D3DCompile with the flags of
+// the raster kernel (internal/hlslgen.Flags). Like KernelDXBC it is made on
+// Windows and committed; TestPresentDXBCIsCompiled recompiles and compares, and
+// writes the fresh bytes to D3D11_DXBC_OUT for the lane's "dxbc" artifact.
+//
+//go:embed present.dxbc
+var PresentDXBC []byte
+
 // ErrUnsupported reports that Direct3D 11 is not available: a platform other
 // than Windows.
 var ErrUnsupported = errors.New("gpu2d/d3d11: Direct3D 11 is not available")
