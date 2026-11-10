@@ -742,10 +742,10 @@ Nothing below is a statement about a GPU.
   constraint is `linux && (amd64 || arm64)`, and `GOOS=android` satisfies
   `linux`, so the real binding is compiled on android/arm64, where purego has no
   CGO-free `Dlopen` (`undefined: cgo.Dlopen`). window's `android` lane builds
-  CGO-free and caught it. The window works around it (the GPU path refuses on
-  android without importing `gpu2d/vulkan`); the constraint wants
-  `linux && !android && (amd64 || arm64)` in go-gfx/vulkan, with an android build
-  in its cross-build lane.
+  CGO-free and caught it. Fixed upstream: go-gfx/vulkan v0.2.1 (#6) constrains
+  the loader to `linux && !android && (amd64 || arm64)`, android gets the
+  `ErrUnsupported` stub, and its CI vets and builds android/arm64 CGO-free.
+  gpu2d v0.9.2 requires it, and the window's temporary workaround is gone.
 - **The fallback is for good, as on Cocoa, not "for that frame".** A frame the
   renderer refuses (`ErrTooLarge`, a lost device, a timeout, a frame of the wrong
   size) releases the renderer, records the error (`GPUError`) and is drawn on
