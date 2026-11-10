@@ -904,6 +904,80 @@ go-mswin/d3d11 v0.1.0, in the nested module `hlsl/hlsltest`:
   first record held the hash of that. `.gitattributes` now pins the generated
   files, and the committed record was remade from the corrected run.
 
+### Outcomes of D3 (2026-11-10)
+
+Package `d3d11` of gpu2d is a back-end with the shape of `metal` and `vulkan`
+(`New`, `NewWith`, `Draw`, `Submit`/`Wait` over two slots, `Pixels`, `Resize`,
+`Close`, `Name`, the same errors), running the committed `kernel_gen.dxbc`
+through go-mswin/d3d11 v0.1.0. It ships opt-in. Non-Windows builds have stubs
+returning `ErrUnsupported`; linux, darwin, windows (amd64, 386), js/wasm and
+linux/386 vet. Nothing here has run on a GPU: WARP only, on `windows-latest`
+(run 42846149477, "Microsoft Basic Render Driver", feature level 11_1, buffer
+limit 134217728 bytes).
+
+**Parity on WARP.** `TestMatchesReference` (300 random scenes, 64 × 48, 4769
+instances per ground, all five kinds): max |Δ| 0, 0 of 3,686,400 channels
+differ, on the opaque and on the translucent ground. That is WARP's arithmetic,
+not a GPU's.
+
+**Break checks.**
+- A kernel with the red rounding changed in the WGSL, emitted as HLSL and
+  compiled by `D3DCompile` in the test, run in the same parity test: max |Δ| 2,
+  6936 of 1,474,560 channels differ.
+- `TestBreakCheckWrongUAV` binds u3 to a decoy: `Pixels` keeps its 0xAA fill,
+  and the decoy is drawn on.
+- `TestSecondSubmitDrawsOverTheDevicesFrame` scribbles on `Pixels` between two
+  Submits; the second frame must not see it (it draws over the device's frame).
+
+**Upload and read-back (what was chosen).**
+- go-mswin/d3d11 v0.1.0 fills a structured buffer only at creation
+  (`BufferDesc.Initial`); `UpdateBuffer` accepts constant buffers only. So no
+  buffer is reused: each Submit creates the instance, bins and arena buffers
+  with their data and their SRVs, and releases them at Wait. The 16-byte frame
+  constant buffer is per slot and `UpdateBuffer`d.
+- `Pixels` is a host copy. With nothing in flight, Submit creates the target
+  (UAV, `Initial` = `Pixels`), because the caller may have written the ground
+  there; a second queued frame draws over the device's frame. The Wait that
+  ends the last frame waits for the device, copies the target to a staging
+  buffer, maps it and copies into `Pixels`.
+- Binning is not in place: `List.Bin` fills host slices kept per slot, written
+  as bytes into the buffer's initial data. (Metal and Vulkan bin straight into
+  device-visible memory; D3D11 has none.)
+- A frame past the buffer limit (`4·w·h` > limit, so 5793² on WARP), past 65535
+  groups per dimension, or a slot buffer past the limit, is `gpu2d.ErrTooLarge`
+  with nothing in flight; `Options.MaxBufferBytes` lowers the limit for the test.
+
+**Measured: WARP on a CI VM, never GPU speed** (4 vCPU runner, 20 iterations,
+one run, load unknown; `BenchmarkWidgetFrame`, `Stats` per frame):
+
+| frame | WARP, `Draw` | pack | target upload | device | read-back | CPU `Rasterize` (same run) |
+|---|---|---|---|---|---|---|
+| 1080p | 96.9 ms | 0.26 ms | 0.53 ms | 84.7 ms | 11.3 ms | 39.9 ms |
+| 4K | 370.4 ms | 1.21 ms | 2.57 ms | 348.7 ms | 17.9 ms | 161.5 ms |
+
+The copies (upload plus read-back) are 12 % of a 1080p frame and 5.5 % of a 4K
+one on WARP; on a discrete GPU they cross PCIe and will weigh more, which only
+a hardware run can say. WARP is 2.4x slower than the CPU reference on this
+runner: WARP is a software rasterizer, so this is not the verdict on the
+back-end, but it means the CI numbers say nothing about where D3D11 wins.
+
+**What this document got wrong or left out.**
+- **"In-place binning into GPU memory may not apply"** is confirmed: it does not.
+  The CPU-to-device copy is mandatory, and with v0.1.0 so is a buffer creation
+  per input per frame.
+- **No per-frame completion.** The binding's `Wait` is an event query on the
+  whole context, so `Wait` of the first of two frames cannot block on that frame
+  alone; it checks `RemovedReason` and gives the buffers back, and the Wait that
+  ends the last frame blocks. Nothing observable differs (Pixels is the device's
+  until then), but "two slots in flight" is two queued frames, not two fences.
+  There is also no `Flush`: queued commands start no later than that Wait.
+- **`Software` is not the default.** `New` asks for a hardware adapter; the tests
+  and CI pass `Options.Software` (WARP), and `D3D11_HARDWARE=1` selects the
+  default adapter.
+- **go-mswin/d3d11 follow-ups:** `UpdateBuffer` on default structured and raw
+  buffers (`UpdateSubresource` is legal on them), and a `Flush`, would remove the
+  per-frame buffer creation and let a frame start before its Wait.
+
 ## Risks
 
 1. **Biggest: identity across vendors.** The specifications permit

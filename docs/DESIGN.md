@@ -185,6 +185,16 @@ go-widgets/painter, and the adapter of milestone 5 applies the translation.
    second frame without waiting on the first's fence. The kernel declares
    `RoundingModeRTE` (`kernel_rte_gen.spv`) where the device reports it, and
    `robustBufferAccess` is enabled where offered.
+10. D3 of NATIVE.md: package `d3d11`, the same shape over go-mswin/d3d11,
+   running `d3d11/kernel_gen.dxbc` (the HLSL emitted from `kernel.wgsl`,
+   compiled on the Windows lane and committed). Opt-in, proven on WARP only.
+   Direct3D 11 offers no persistently mapped GPU-writable buffer, so the
+   renderer's `Pixels` is a host copy: the target is created from it when
+   nothing is in flight, stays on the device between queued frames, and is
+   read back through a staging buffer by the `Wait` that ends the last frame.
+   Binning is still in place, into host memory, and the bytes are copied into
+   buffers created with their data (the binding fills a structured buffer only
+   at creation). A frame past the device's buffer limit is `gpu2d.ErrTooLarge`.
 
 ## Sources opened
 
