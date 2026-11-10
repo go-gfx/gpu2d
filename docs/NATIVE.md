@@ -169,8 +169,11 @@ needs more terms. It also moves a root by one step only, while Vulkan allows
 `sqrt` more than that. It is therefore not in `kernel.wgsl` yet: where it
 matters (lavapipe, RADV, WARP) it is to be finished and measured with W2.
 
-The first paragraph's plan, as written before K1:
-It enters in K1 behind a measurement: the parity suite runs on lavapipe,
+**Deferred to W2.** Nothing is labelled correctly rounded until the corrector
+is exact near midpoints and has been measured on lavapipe, RADV and WARP.
+
+The plan as written before K1: it enters in K1 behind a measurement: the
+parity suite runs on lavapipe,
 RADV, WARP and Metal with and without it. It is kept only if it changes no
 byte on Metal. Where RTE is not offered, the back-end does not claim
 identity. It reports the tolerance (|Δ| ≤ 1 per channel, the DESIGN.md
@@ -474,6 +477,46 @@ the maximum difference and the count of differing channels.
 | D2 | wgsl, gpu2d | `hlsl` package; `kernel.dxbc` generated on CI | Drift test on the Windows lane; edge-case semantics on WARP |
 | D3 | gpu2d | `d3d11` back-end | Parity on WARP |
 | D4 | window | Swap chain on the HWND, `Config.GPU` on Win32 | Live window on the CI runner when it has a desktop session; back buffer read through staging and compared |
+
+### Outcomes of K0 and K1 (2026-11-10)
+
+K0 (gpu2d v0.7.0, #25) and K1 (go-gfx/wgsl v0.6.0, v0.6.1 and v0.6.2; gpu2d
+v0.8.0, #26) are done. What they changed in this design:
+
+- **Compute mode stays opt-in.** `webgpu.NewCompute` is byte-identical to
+  `Rasterize` on both grounds (0 differing channels in Chromium on the M4 Max,
+  and on the macOS and SwiftShader CI lanes), but it is slower than the
+  fixed-function path on every frame measured: +57 % at 1080p, +36 % at 4K,
+  +53 % on the gallery frame (CPU binning and the bins upload are in the
+  frame). By the rule that compute replaces fixed-function only if not slower,
+  it does not.
+- **The generated Metal kernel is identical and not slower.**
+  `metal/kernel_gen.metal` comes from `kernel.wgsl` through `msl.Module`;
+  `TestMatchesReference` still finds 0 differing channels, and `WidgetFrame`
+  and `Submit` against v0.7.0 are equal or 2 % faster. `kernel.metal` and
+  `coverage_gen.metal` are gone.
+- **`present.metal` stays hand-written.** The present kernel writes a
+  texture, which `msl` does not emit and `kernel.wgsl` has no equivalent for.
+- **Spans and list are one `bins` buffer.** As the kernel binds them (four
+  storage buffers and one uniform); a slot still bins in place, without a copy.
+  Buffer indices are the WGSL bindings: instances 0, bins 1, arena 2, pixels 3,
+  frame 4.
+- **`u32(f32)` saturates at 4294967040, and `i32(f32)` at 2147483520.** The
+  specification takes the closest value that is also representable in f32
+  (`wgsl/index.bs`, "Floating Point Conversion"). The checker's constant
+  evaluator said 4294967295 and 2147483647; fixed in go-gfx/wgsl v0.6.2. The
+  emitters (SPIR-V, HLSL) must follow the specification, not the old value.
+- **Out-of-bounds indexing is unchecked in `msl`.** WGSL bounds the outcomes of
+  an out-of-bounds access (a trap, a zero, any location of the buffer); MSL
+  does not, and a runtime-sized array's length is not known to the kernel. The
+  kernel's indices are in range by construction, and the host sizes the
+  buffers. The SPIR-V and HLSL emitters will have the same choice to make.
+- **`main` is a reserved name** in `msl` (MSL refuses a kernel called `main`),
+  and a function may call one declared below it (prototypes first, v0.6.1).
+- **The correctly rounded sqrt:** Metal's `length()` is already correctly
+  rounded on the sets tested, and the proposed corrector is not exact near
+  midpoints; see "sqrt is the one operation no specification pins". It is
+  deferred to W2.
 
 **Benchmarks (G1, L2, D3).**
 - The reference is the CPU path, PixelPainter on one core, measured against
