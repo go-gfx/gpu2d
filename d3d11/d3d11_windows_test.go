@@ -421,6 +421,52 @@ func TestSecondSubmitDrawsOverTheDevicesFrame(t *testing.T) {
 	}
 }
 
+// TestBuffersAreReusedAndGrow: a slot's input buffers are kept from frame to
+// frame, grow when a list needs more (never shrink), and every frame, before
+// and after a growth, is still the reference's.
+func TestBuffersAreReusedAndGrow(t *testing.T) {
+	const w, h = 96, 64
+	r := renderer(t, w, h)
+	g := ground(w, h, false)
+	frame := func(seed uint64, n int) *gpu2d.List {
+		l, _ := gpu2d.NewList(w, h)
+		scenes.Random(l, seed, n)
+		return l
+	}
+	check := func(l *gpu2d.List) {
+		t.Helper()
+		want := append([]byte(nil), g...)
+		if err := l.Rasterize(want); err != nil {
+			t.Fatal(err)
+		}
+		copy(r.Pixels(), g)
+		if err := r.Draw(l); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(r.Pixels(), want) {
+			t.Fatal("a frame differs from the reference")
+		}
+	}
+	check(frame(1, 40)) // slot 0
+	first := r.slot[0].in[0].buf
+	size := first.Size()
+	for seed := uint64(2); seed < 12; seed++ {
+		check(frame(seed, 10)) // slot 0 again, no more than before
+	}
+	if r.slot[0].in[0].buf != first {
+		t.Fatal("the instance buffer was recreated although it was large enough")
+	}
+	check(frame(99, 4000)) // far more instances: it must grow
+	if r.slot[0].in[0].buf == first || r.slot[0].in[0].buf.Size() <= size {
+		t.Fatalf("the instance buffer did not grow: %d then %d", size, r.slot[0].in[0].buf.Size())
+	}
+	grown := r.slot[0].in[0].buf
+	check(frame(3, 10))
+	if r.slot[0].in[0].buf != grown {
+		t.Fatal("the instance buffer shrank or was recreated")
+	}
+}
+
 // TestSubmitCopiesTheList records frame A, submits it, overwrites the list
 // with frame B at once, and checks the device still drew A.
 func TestSubmitCopiesTheList(t *testing.T) {

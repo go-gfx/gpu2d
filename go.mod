@@ -7,7 +7,7 @@ require (
 	github.com/go-gfx/webgpu v0.15.0
 	github.com/go-gfx/wgsl v0.9.0
 	github.com/go-macos/metal v0.6.0
-	github.com/go-mswin/d3d11 v0.1.0
+	github.com/go-mswin/d3d11 v0.2.0
 	golang.org/x/sys v0.49.0
 )
 

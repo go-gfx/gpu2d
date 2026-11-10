@@ -16,10 +16,12 @@
 // copy of the frame, not the device's memory. A frame is uploaded when Submit
 // finds nothing in flight (the caller may have written the ground into Pixels),
 // stays on the device while frames are queued, and is copied back through a
-// staging buffer by the Wait that ends the last frame in flight. go-mswin/d3d11
-// v0.1.0 can fill a structured buffer only when it is created, so each frame's
-// input buffers (instances, bins, arena) are created with their data, and the
-// target with the host copy; Stats says what each of those costs.
+// staging buffer by the Wait that ends the last frame in flight. Each slot keeps
+// its input buffers (instances, bins, arena) from frame to frame, DYNAMIC
+// structured buffers rewritten with Map WRITE_DISCARD and grown on demand; the
+// target is a DEFAULT buffer filled with UpdateSubresource (go-mswin/d3d11
+// v0.2.0). Each frame has its own fence, so Wait of the first of two frames
+// returns when that frame is done. Stats says what each part costs.
 //
 // The back-end ships opt-in and is proven on WARP in CI only (docs/NATIVE.md,
 // "Decisions taken"); no Windows GPU has run it. There is no presentation
@@ -105,11 +107,11 @@ type Options struct {
 }
 
 // Stats is the time a Renderer has spent in each part of a frame since it was
-// made (or since ResetStats). Pack bins the list and creates and fills the
-// frame's input buffers; Upload creates the target from the host copy of the
-// frame; GPU is from the end of the last Submit to the device being done;
-// Readback copies the target to the staging buffer, maps it and copies it into
-// Pixels. Every one is wall time on the calling goroutine.
+// made (or since ResetStats). Pack bins the list and writes it into the slot's
+// input buffers (growing them when needed); Upload copies the host frame into
+// the device's target; GPU is, per frame, from its queueing to its fence
+// passing; Readback copies the target to the staging buffer, maps it and copies
+// it into Pixels. Every one is wall time on the calling goroutine.
 type Stats struct {
 	Frames                      int
 	Pack, Upload, GPU, Readback time.Duration

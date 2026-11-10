@@ -33,33 +33,36 @@ const (
 // instStride is the byte size of the kernel's Inst.
 const instStride = gpu2d.InstanceSize
 
-// slot is the per-frame input: the buffers the device reads until the frame is
-// waited for, and the host scratch they are filled from.
-type slot struct {
-	inst, bins, arena *dx.Buffer
-	uni               *dx.Buffer // the frame constants, updated each Submit
-	srv               [3]*dx.SRV
-	spans, list       []uint32 // Bin's storage, kept between frames
-	ibytes, bbytes    []byte   // padded host images of the buffers
-	abytes            []byte
+// input is one of a slot's read-only buffers: a DYNAMIC structured buffer
+// (GPU read, CPU write; the D3D11_USAGE page: "a good choice for a resource
+// that will be updated by the CPU at least once per frame") and its SRV. It
+// lives as long as the slot and grows on demand, as metal's and vulkan's do.
+type input struct {
+	buf    *dx.Buffer
+	srv    *dx.SRV
+	stride uint32
 }
 
-// release drops the frame's buffers and views. Direct3D keeps a resource alive
-// until the commands that use it have run, so this is safe with a frame in
-// flight; it is done at Wait so that memory does not pile up.
-func (s *slot) release() {
-	for i, v := range s.srv {
-		if v != nil {
-			v.Close()
-			s.srv[i] = nil
-		}
+func (in *input) close() {
+	if in.srv != nil {
+		in.srv.Close()
+		in.srv = nil
 	}
-	for _, b := range []**dx.Buffer{&s.inst, &s.bins, &s.arena} {
-		if *b != nil {
-			(*b).Close()
-			*b = nil
-		}
+	if in.buf != nil {
+		in.buf.Close()
+		in.buf = nil
 	}
+}
+
+// slot is the per-frame input: the buffers the device reads until the frame's
+// fence has passed, and the host scratch they are filled from.
+type slot struct {
+	in             [3]input   // tInst, tBins, tArena
+	uni            *dx.Buffer // the frame constants, updated each Submit
+	fence          *dx.Fence  // after this slot's frame; nil when idle
+	t              time.Time  // when the frame was queued
+	spans, list    []uint32   // Bin's storage, kept between frames
+	ibytes, bbytes []byte     // host images of the buffers
 }
 
 // Renderer draws lists into a w × h RGBA frame on a Direct3D 11 device.
@@ -72,7 +75,7 @@ type Renderer struct {
 	sh     *dx.ComputeShader
 	w, h   int
 	pix    []byte     // the host copy of the frame: what Pixels returns
-	target *dx.Buffer // the device's frame, made from pix when nothing is in flight
+	target *dx.Buffer // the device's frame (DEFAULT usage, UAV), filled from pix when nothing is in flight
 	uav    *dx.UAV
 	stage  *dx.Buffer // CPU-readable copy of the target
 	slot   [slots]slot
@@ -80,7 +83,6 @@ type Renderer struct {
 	n      int // frames in flight
 	closed bool
 	stats  Stats
-	last   time.Time // end of the last Submit, for Stats.GPU
 }
 
 // New opens the default hardware adapter and allocates a w × h frame.
@@ -112,7 +114,9 @@ func NewWith(w, h int, o Options) (*Renderer, error) {
 		return nil, err
 	}
 	for i := range r.slot {
-		if r.slot[i].uni, err = dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindConstant, Size: 16}); err != nil {
+		s := &r.slot[i]
+		s.in[0].stride, s.in[1].stride, s.in[2].stride = instStride, 4, 4
+		if s.uni, err = dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindConstant, Size: 16}); err != nil {
 			r.Close()
 			return nil, tooLarge(err)
 		}
@@ -143,18 +147,30 @@ func (r *Renderer) check(w, h int) error {
 	return nil
 }
 
-// alloc makes the host copy and the staging buffer for w × h, and forgets the
-// device's target: the next Submit with nothing in flight makes it from pix.
+// alloc makes the host copy, the device's target and the staging buffer for
+// w × h. The old ones are released once the new exist.
 func (r *Renderer) alloc(w, h int) error {
-	st, err := r.dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindStaging, Size: 4 * uint64(w) * uint64(h)})
+	size := 4 * uint64(w) * uint64(h)
+	st, err := r.dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindStaging, Size: size})
 	if err != nil {
 		return tooLarge(err)
 	}
+	t, err := r.dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindStructured, Size: size, Stride: 4, UAV: true})
+	if err != nil {
+		st.Close()
+		return tooLarge(err)
+	}
+	u, err := t.UAV()
+	if err != nil {
+		st.Close()
+		t.Close()
+		return tooLarge(err)
+	}
+	r.dropTarget()
 	if r.stage != nil {
 		r.stage.Close()
 	}
-	r.dropTarget()
-	r.stage, r.pix, r.w, r.h = st, make([]byte, 4*w*h), w, h
+	r.stage, r.target, r.uav, r.pix, r.w, r.h = st, t, u, make([]byte, size), w, h
 	return nil
 }
 
@@ -214,11 +230,11 @@ func (r *Renderer) Draw(l *gpu2d.List) error {
 }
 
 // Submit bins and packs the list into the next free slot, sends it to the
-// device and returns. The list is copied into device buffers before Submit
-// returns: the caller may Reset and record the next frame at once, which is the
-// overlap. Frames run in submission order on the one immediate context, each
-// compositing over the previous one's result, which stays on the device. At
-// most two frames are in flight; a third Submit is ErrBusy.
+// device and returns. The list is copied into the slot's device buffers before
+// Submit returns: the caller may Reset and record the next frame at once, which
+// is the overlap. Frames run in submission order on the one immediate context,
+// each compositing over the previous one's result, which stays on the device.
+// At most two frames are in flight; a third Submit is ErrBusy.
 //
 // With nothing in flight, Submit first uploads Pixels as the frame to draw over.
 // The frame's memory belongs to the device until Wait has returned for every
@@ -236,38 +252,26 @@ func (r *Renderer) Submit(l *gpu2d.List) error {
 	if r.n == 0 {
 		t0 = time.Now()
 		if err := r.upload(); err != nil {
-			s.release()
 			return err
 		}
 		r.stats.Upload += time.Since(t0)
 	}
 	across, _ := l.Tiles()
 	if err := r.record(s, r.uav, across); err != nil {
-		s.release()
 		return err
 	}
 	r.n++
-	r.last = time.Now()
 	return nil
 }
 
-// upload makes the device's target from the host copy.
+// upload copies the host frame into the device's target in place
+// (UpdateSubresource on a DEFAULT buffer).
 func (r *Renderer) upload() error {
-	r.dropTarget()
-	t, err := r.dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindStructured, Size: uint64(len(r.pix)), Stride: 4, UAV: true, Initial: r.pix})
-	if err != nil {
-		return tooLarge(err)
-	}
-	u, err := t.UAV()
-	if err != nil {
-		t.Close()
-		return tooLarge(err)
-	}
-	r.target, r.uav = t, u
-	return nil
+	return tooLarge(r.ctx.UpdateBuffer(r.target, r.pix))
 }
 
-// record binds the kernel's resources and dispatches it, writing into uav.
+// record binds the kernel's resources, dispatches it, writing into uav, sends
+// the commands to the device and fences the frame.
 func (r *Renderer) record(s *slot, uav *dx.UAV, across int) error {
 	var f [16]byte
 	binary.LittleEndian.PutUint32(f[0:], uint32(r.w))
@@ -278,7 +282,7 @@ func (r *Renderer) record(s *slot, uav *dx.UAV, across int) error {
 	for _, err := range []error{
 		c.UpdateBuffer(s.uni, f[:]),
 		c.SetShader(r.sh),
-		c.SetSRVs(tInst, s.srv[0], s.srv[1], s.srv[2]),
+		c.SetSRVs(tInst, s.in[0].srv, s.in[1].srv, s.in[2].srv),
 		c.SetUAVs(uPix, uav),
 		c.SetConstantBuffers(bFrame, s.uni),
 		c.Dispatch(uint32((r.w+15)/16), uint32((r.h+7)/8), 1),
@@ -287,15 +291,23 @@ func (r *Renderer) record(s *slot, uav *dx.UAV, across int) error {
 			return tooLarge(err)
 		}
 	}
+	fe, err := c.Signal()
+	if err != nil {
+		return err
+	}
+	if err := c.Flush(); err != nil {
+		fe.Close()
+		return err
+	}
+	s.fence, s.t = fe, time.Now()
 	return nil
 }
 
 // Wait blocks until the oldest frame in flight has finished and returns the
-// device's verdict on it; ErrNothingInFlight when there is none. The frames
-// share one in-order context, so the device cannot be asked about one frame
-// alone: with another frame still queued, Wait only checks the device is
-// healthy and gives the frame's buffers back; the Wait that ends the last
-// frame blocks until the device is done and copies the frame into Pixels.
+// device's verdict on it; ErrNothingInFlight when there is none. Each frame has
+// its own fence, so Wait of the first of two returns when that frame is done,
+// with the second still running. The Wait that ends the last frame also copies
+// the frame into Pixels.
 func (r *Renderer) Wait() error {
 	if r.n == 0 {
 		return ErrNothingInFlight
@@ -303,15 +315,17 @@ func (r *Renderer) Wait() error {
 	s := &r.slot[r.head]
 	r.head = (r.head + 1) % slots
 	r.n--
-	defer s.release()
-	if r.n > 0 {
-		return r.dev.RemovedReason()
-	}
-	if err := r.ctx.Wait(waitLimit); err != nil {
+	err := s.fence.Wait(waitLimit)
+	s.fence.Close()
+	s.fence = nil
+	r.stats.GPU += time.Since(s.t)
+	r.stats.Frames++
+	if err != nil {
 		return timeout(err)
 	}
-	r.stats.GPU += time.Since(r.last)
-	r.stats.Frames++
+	if r.n > 0 {
+		return nil
+	}
 	t0 := time.Now()
 	defer func() { r.stats.Readback += time.Since(t0) }()
 	return r.readback()
@@ -361,17 +375,47 @@ func (r *Renderer) Resize(w, h int) error {
 	return r.alloc(w, h)
 }
 
-// pad returns src in dst's storage, zero-extended to a multiple of mult and at
-// least min bytes: a structured buffer holds whole elements, and the kernel
-// reads whole words.
-func pad(dst *[]byte, src []byte, mult, min int) []byte {
-	n := (max(len(src), min) + mult - 1) / mult * mult
-	b := append((*dst)[:0], src...)
-	for len(b) < n {
-		b = append(b, 0)
+// fit makes in hold n bytes (a whole number of elements, at least one),
+// replacing its buffer by a larger one when it does not: doubling, up to the
+// device's limit, as metal's fit does. Nothing is in flight on this slot's
+// buffers when it runs.
+func (r *Renderer) fit(in *input, n int) error {
+	st := uint64(in.stride)
+	need := (max(uint64(n), st) + st - 1) / st * st
+	if in.buf != nil && in.buf.Size() >= need {
+		return nil
 	}
-	*dst = b
-	return b
+	c := need
+	if in.buf != nil {
+		c = max(c, 2*in.buf.Size())
+	}
+	if lim := r.dev.MaxBufferBytes(); c > lim && need <= lim {
+		c = lim / st * st // grow no further than the device allows
+	}
+	b, err := r.dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindStructured, Size: c, Stride: in.stride, SRV: true, Dynamic: true})
+	if err != nil {
+		return tooLarge(err)
+	}
+	v, err := b.SRV()
+	if err != nil {
+		b.Close()
+		return tooLarge(err)
+	}
+	in.close()
+	in.buf, in.srv = b, v
+	return nil
+}
+
+// put writes data to the start of in's buffer; the kernel reads only what the
+// CPU indexed, so an empty write is skipped.
+func (r *Renderer) put(in *input, data []byte) error {
+	if err := r.fit(in, len(data)); err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return tooLarge(r.ctx.UpdateBuffer(in.buf, data))
 }
 
 // putWords appends ws to b as little-endian 32-bit words.
@@ -382,7 +426,8 @@ func putWords(b []byte, ws []uint32) []byte {
 	return b
 }
 
-// pack bins the list and creates the next free slot's buffers with their data.
+// pack bins the list and writes it into the next free slot's buffers, which are
+// kept and grown, not made anew.
 func (r *Renderer) pack(l *gpu2d.List) (*slot, error) {
 	if r.n == slots {
 		return nil, ErrBusy
@@ -391,37 +436,18 @@ func (r *Renderer) pack(l *gpu2d.List) (*slot, error) {
 		return nil, ErrSize
 	}
 	s := &r.slot[(r.head+r.n)%slots]
-	s.release()
 	var err error
 	s.spans, s.list, err = l.Bin(s.spans, s.list)
 	if err != nil {
 		return nil, err
 	}
 	s.ibytes = gpu2d.AppendBytes(s.ibytes[:0], l.Instances())
-	inst := pad(&s.ibytes, s.ibytes, instStride, instStride)
 	s.bbytes = putWords(putWords(s.bbytes[:0], s.spans), s.list)
-	bins := pad(&s.bbytes, s.bbytes, 4, 4)
-	arena := pad(&s.abytes, l.Data(), 4, 4)
-	ok := false
-	defer func() {
-		if !ok {
-			s.release()
-		}
-	}()
-	for _, b := range []struct {
-		buf    **dx.Buffer
-		srv    int
-		data   []byte
-		stride uint32
-	}{{&s.inst, 0, inst, instStride}, {&s.bins, 1, bins, 4}, {&s.arena, 2, arena, 4}} {
-		if *b.buf, err = r.dev.CreateBuffer(dx.BufferDesc{Kind: dx.KindStructured, Size: uint64(len(b.data)), Stride: b.stride, SRV: true, Initial: b.data}); err != nil {
-			return nil, tooLarge(err)
-		}
-		if s.srv[b.srv], err = (*b.buf).SRV(); err != nil {
-			return nil, tooLarge(err)
+	for i, data := range [3][]byte{s.ibytes, s.bbytes, l.Data()} {
+		if err := r.put(&s.in[i], data); err != nil {
+			return nil, err
 		}
 	}
-	ok = true
 	return s, nil
 }
 
@@ -437,9 +463,12 @@ func (r *Renderer) Close() {
 	}
 	r.closed = true
 	for i := range r.slot {
-		r.slot[i].release()
-		if r.slot[i].uni != nil {
-			r.slot[i].uni.Close()
+		s := &r.slot[i]
+		for j := range s.in {
+			s.in[j].close()
+		}
+		if s.uni != nil {
+			s.uni.Close()
 		}
 	}
 	r.dropTarget()
