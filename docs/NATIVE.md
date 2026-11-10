@@ -518,6 +518,32 @@ v0.8.0, #26) are done. What they changed in this design:
   midpoints; see "sqrt is the one operation no specification pins". It is
   deferred to W2.
 
+### Outcomes of V1 (2026-11-10)
+
+V1 is done: go-gfx/vulkan v0.1.0 (#1). On lavapipe, in CI, with the validation
+layer on, the fill kernel emitted by go-gfx/wgsl `spirv` writes the expected
+bytes with zero validation messages; a wrong descriptor binding fails. **The
+fractal run (RADV, W7700) is pending:** the host did not answer SSH. What it
+changed in this design:
+
+- **Destroy entry points are dlsym'd too.** Besides `vkGetInstanceProcAddr`,
+  the loader resolves `vkDestroyInstance` and `vkDestroyDevice` by `dlsym`, so
+  an object can still be destroyed when resolving the rest of its table fails.
+- **`maxMemoryAllocationSize` is not in `VkPhysicalDeviceProperties`.** It is in
+  `VkPhysicalDeviceMaintenance3Properties`, read through properties2. The
+  instance therefore asks for API 1.2 and the binding refuses a device that
+  reports less than 1.1.
+- **Validation is enabled through `InstanceCreateInfo`, not
+  `VK_INSTANCE_LAYERS`.** `Options.Validation` names the layer and fails with
+  `ErrLayerNotPresent` when it is absent, so a run cannot validate nothing
+  silently. The tests capture stdout and stderr and fail on any message.
+- **The registry holds Vulkan SC variants.** `vk.xml` repeats members and
+  enumerators with `api="vulkansc"`; `vkgen` keeps only those for `vulkan`.
+  The registry is committed gzipped (0.3 MB of 3.3 MB), as the push gate
+  refuses blobs of 1 MiB or more.
+- **No `dlclose`.** `Close` keeps the loader mapped for the life of the
+  process: drivers may keep threads alive after their instance is destroyed.
+
 **Benchmarks (G1, L2, D3).**
 - The reference is the CPU path, PixelPainter on one core, measured against
   the GPU back-end.
