@@ -96,10 +96,19 @@ jobs:
           go-version-file: go.mod
       - name: vet
         run: go vet ./d3d11/... ./internal/hlslgen/...
-      - name: DXBC drift test
+      - name: DXBC drift test and the WARP back-end
         env:
           D3D11_DXBC_OUT: ${{ runner.temp }}\dxbc
+          D3D11_REQUIRE: "1"
         run: go test -count=1 -v ./d3d11/... ./internal/hlslgen/...
+      # Software numbers only: WARP on a CI VM, with the CPU reference beside it.
+      # Never read them as GPU speed.
+      - name: benchmark (WARP on a CI VM, and the CPU reference)
+        env:
+          D3D11_REQUIRE: "1"
+        run: |
+          go test -count=1 -run '^$' -bench 'WidgetFrame' -benchtime 20x -benchmem ./d3d11/
+          go test -count=1 -run '^$' -bench 'Rasterize' -benchtime 20x ./
       - name: fresh DXBC
         if: always()
         uses: actions/upload-artifact@v4
