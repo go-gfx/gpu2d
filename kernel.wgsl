@@ -3,7 +3,8 @@
 // computes gpu2d.Coverage at its centre in f32 (the functions of
 // webgpu/shader.wgsl, step for step), and blends in integers exactly as
 // PixelPainter's blendInto does, floored alpha included. It is the arithmetic
-// of metal/kernel.metal, so a frame is byte-identical to List.Rasterize over
+// of the Metal kernel, which is generated from this file
+// (metal/kernel_gen.metal), so a frame is byte-identical to List.Rasterize over
 // any ground (docs/NATIVE.md, decision 1).
 //
 // Written inside what the other emitters will express (docs/NATIVE.md): four

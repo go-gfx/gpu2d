@@ -24,18 +24,19 @@ import (
 )
 
 // Kernel is the Metal Shading Language source; its entry points are "raster"
-// and "present". The coverage functions are not written here: they are
-// generated from the WebGPU shader (coverage_gen.metal, by internal/mslgen),
-// so the arithmetic exists once, in WGSL.
-var Kernel = coverageMSL + kernelMSL
+// and "present". "raster" is not written here: it is generated from
+// kernel.wgsl (kernel_gen.metal, by internal/mslgen), so the raster arithmetic
+// exists once, in WGSL. "present" writes a texture, which the emitter does
+// not, so it stays hand-written (present.metal).
+var Kernel = kernelMSL + presentMSL
 
 //go:generate go run ../internal/mslgen/cmd/genmsl
 
-//go:embed coverage_gen.metal
-var coverageMSL string
-
-//go:embed kernel.metal
+//go:embed kernel_gen.metal
 var kernelMSL string
+
+//go:embed present.metal
+var presentMSL string
 
 // ErrSize reports a list whose surface is not the renderer's.
 var ErrSize = errors.New("gpu2d/metal: list size differs from the renderer's")
@@ -57,9 +58,9 @@ const slots = 2
 // slot is the per-frame input memory. The GPU reads it until the slot's
 // Pending is waited on, so each in-flight frame owns its own.
 type slot struct {
-	inst, spans, list, data *mtl.Buffer
-	bytes                   []byte
-	pend                    *mtl.Pending
+	inst, bins, data *mtl.Buffer // bins: the tiles' spans, then the list
+	bytes            []byte
+	pend             *mtl.Pending
 }
 
 // Renderer draws lists into a w × h RGBA frame in GPU-visible memory.
@@ -118,7 +119,7 @@ func (r *Renderer) Pixels() []byte { return r.target.Bytes() }
 // fit returns b if it holds n bytes, else a new buffer of at least n
 // (doubling), closing b.
 func (r *Renderer) fit(b *mtl.Buffer, n int) (*mtl.Buffer, error) {
-	n = max(n, 4)
+	n = (max(n, 4) + 3) &^ 3 // the kernel reads whole words
 	if b != nil && len(b.Bytes()) >= n {
 		return b, nil
 	}
@@ -224,11 +225,10 @@ func (r *Renderer) Resize(w, h int) error {
 func (r *Renderer) raster(e *mtl.Encoder, s *slot, f *frame) {
 	e.Use(r.pipe)
 	e.Buffer(0, s.inst)
-	e.Buffer(1, s.spans)
-	e.Buffer(2, s.list)
+	e.Buffer(1, s.bins)
+	e.Buffer(2, s.data)
 	e.Buffer(3, r.target)
 	mtl.Constant(e, 4, f)
-	e.Buffer(5, s.data)
 	e.Dispatch(r.w, r.h)
 }
 
@@ -251,18 +251,23 @@ func (r *Renderer) pack(l *gpu2d.List) (*slot, frame, error) {
 		return nil, frame{}, ErrSize
 	}
 	s := &r.slot[(r.head+r.n)%slots]
-	// Bin straight into the slot's buffers, which no frame in flight reads.
-	// Bin reuses the storage it is given when it is large enough, so the
-	// indices land in GPU memory with no copy; place copies only after Bin
-	// had to grow past a buffer, and the grown buffer is reused afterwards.
-	spans, list, err := l.Bin(words(s.spans), words(s.list))
+	across, down := l.Tiles()
+	// Bin straight into the slot's buffer, which no frame in flight reads: the
+	// spans fill its first 2·across·down words and the list follows. Bin
+	// reuses the storage it is given when it is large enough, so the indices
+	// land in GPU memory with no copy; place copies only after Bin had to grow
+	// past the buffer, and the grown buffer is reused afterwards.
+	ns := 2 * across * down
+	bw := words(s.bins)
+	var spans0, list0 []uint32
+	if len(bw) >= ns {
+		spans0, list0 = bw[:0:ns], bw[ns:]
+	}
+	spans, list, err := l.Bin(spans0, list0)
 	if err != nil {
 		return nil, frame{}, err
 	}
-	if s.spans, err = r.place(s.spans, spans); err != nil {
-		return nil, frame{}, err
-	}
-	if s.list, err = r.place(s.list, list); err != nil {
+	if s.bins, err = r.place(s.bins, spans, list); err != nil {
 		return nil, frame{}, err
 	}
 	s.bytes = gpu2d.AppendBytes(s.bytes[:0], l.Instances())
@@ -274,7 +279,6 @@ func (r *Renderer) pack(l *gpu2d.List) (*slot, frame, error) {
 	}
 	copy(s.data.Bytes(), l.Data())
 	copy(s.inst.Bytes(), s.bytes)
-	across, _ := l.Tiles()
 	return s, frame{W: uint32(r.w), H: uint32(r.h), Across: uint32(across), Tile: gpu2d.Tile}, nil
 }
 
@@ -306,18 +310,27 @@ func words(b *mtl.Buffer) []uint32 {
 	return unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(m))), len(m)/4)
 }
 
-// place makes buf hold ws. When ws already lives in buf (Bin reused it)
-// there is nothing to do; otherwise buf grows to fit and ws is copied in.
-func (r *Renderer) place(buf *mtl.Buffer, ws []uint32) (*mtl.Buffer, error) {
-	if v := words(buf); len(ws) > 0 && len(v) > 0 && &v[0] == &ws[0] {
+// place makes buf hold spans followed by list. When both already live in buf
+// (Bin reused it) there is nothing to do; otherwise a larger buffer is
+// allocated and both are copied in, before the old one, which one of them may
+// live in, is closed.
+func (r *Renderer) place(buf *mtl.Buffer, spans, list []uint32) (*mtl.Buffer, error) {
+	v := words(buf)
+	if len(v) >= len(spans) && len(spans) > 0 && &v[0] == &spans[0] &&
+		(len(list) == 0 || (len(v) >= len(spans)+len(list) && &v[len(spans)] == &list[0])) {
 		return buf, nil
 	}
-	buf, err := r.fit(buf, 4*len(ws))
+	n := 4 * (len(spans) + len(list))
+	nb, err := r.d.NewBuffer(max(n, 2*len(v)*4, 4))
 	if err != nil {
 		return nil, err
 	}
-	putWords(buf.Bytes(), ws)
-	return buf, nil
+	putWords(nb.Bytes(), spans)
+	putWords(nb.Bytes()[4*len(spans):], list)
+	if buf != nil {
+		buf.Close()
+	}
+	return nb, nil
 }
 
 // putWords writes ws into b as little-endian 32-bit words.
@@ -337,7 +350,7 @@ func (r *Renderer) Close() {
 	}
 	for i := range r.slot {
 		s := &r.slot[i]
-		for _, b := range []*mtl.Buffer{s.inst, s.spans, s.list, s.data} {
+		for _, b := range []*mtl.Buffer{s.inst, s.bins, s.data} {
 			if b != nil {
 				b.Close()
 			}

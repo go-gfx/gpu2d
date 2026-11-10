@@ -236,6 +236,13 @@ walks its tile's instances in order, computes `Coverage` (with
 PixelPainter's integer arithmetic. Binning is bounded (`MaxBinned`) and
 refused before anything is allocated.
 
+The kernel is not written in Metal: `metal/kernel_gen.metal` is generated from
+`kernel.wgsl` (`go generate ./metal`) by go-gfx/wgsl's `msl` package, the same
+WGSL the WebGPU compute mode runs, so the raster arithmetic exists once.
+`TestKernelMetalIsGenerated` fails on a stale file, and `TestMatchesReference`
+still finds 0 differing channels on both grounds. Only the present kernel
+(`metal/present.metal`) is hand-written, since it writes a texture.
+
 ## Bounds
 
 Every coordinate a list records, translation included, lies within ±2^24

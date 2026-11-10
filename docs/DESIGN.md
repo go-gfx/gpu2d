@@ -81,7 +81,7 @@ on an M4 Max, and `Draw` blocks the CPU for all of it. go-macos/metal v0.4.0
 adds `Device.Submit` (commit without `waitUntilCompleted`) and
 `Pending.Wait`/`Done`, from MTLCommandBuffer's `commit`, `waitUntilCompleted`
 and `status` (MTLCommandBuffer.h). The Renderer keeps two slots of input
-buffers (instances, spans, list, data): `Submit` bins and packs into a free
+buffers (instances, bins = spans then list, data): `Submit` bins and packs into a free
 slot, so the list is free to be reset at once and the CPU records frame N+1
 while the GPU draws frame N. The target is one buffer; command buffers on one
 queue run in order, so two frames in flight composite in submission order.
@@ -164,6 +164,14 @@ go-widgets/painter, and the adapter of milestone 5 applies the translation.
    M4 Max, which closes the "alpha up to 4" gap above for this mode. Opt-in:
    the fixed-function path stays the default until the measurement table in
    the pull request is decided on.
+8. K1 of NATIVE.md: the Metal raster kernel is generated from `kernel.wgsl`
+   (`metal/kernel_gen.metal`, by `internal/mslgen` through go-gfx/wgsl
+   v0.6.1's `msl.Module`; `TestKernelMetalIsGenerated` catches drift). It
+   replaces `kernel.metal`'s raster and blend and `coverage_gen.metal`. The
+   present kernel stays hand-written (`metal/present.metal`): it writes a
+   texture, which the emitter does not. The Metal Renderer's slots hold the
+   tiles' spans and list in one buffer, as the kernel binds them. Still
+   byte-identical to `Rasterize`; no slower than the hand-written kernel.
 
 ## Sources opened
 

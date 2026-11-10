@@ -1,4 +1,8 @@
 # Generated files keep the generator's LF line endings on every checkout,
-# Windows included: TestCoverageMetalIsGenerated compares the committed file
+# Windows included: TestKernelMetalIsGenerated compares the committed file
 # byte for byte with what the generator writes.
-metal/coverage_gen.metal text eol=lf
+metal/kernel_gen.metal text eol=lf
+# kernel.wgsl is embedded and compared character for character with the shader
+# it shares its coverage functions with; keep it LF too.
+kernel.wgsl text eol=lf
+webgpu/shader.wgsl text eol=lf
