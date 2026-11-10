@@ -699,6 +699,88 @@ binning and copies that grow with the frame, and it returns before the device
 has drawn. The fractal numbers, the comparison with the CPU path on the 7950X
 and with cairo stay **pending**.
 
+### Outcomes of L1 (2026-11-10)
+
+L1 is done except what needs fractal: go-widgets/window #157 (open for review)
+puts `Config.GPU` on the X11 and Wayland back-ends through fallback 2, over
+gpu2d v0.9.1. **Pending, because fractal is down:** the run on the W7700 and
+every hardware number. The live proof ran under lavapipe in a linux/arm64
+container (`test/gpu-linux/Dockerfile` in the window repository) instead.
+Nothing below is a statement about a GPU.
+
+- **Live byte equality, per protocol, under lavapipe (llvmpipe, LLVM 19.1.7).**
+  - X11 (Xvfb, MIT-SHM): the window read back with `XGetImage` equals a window
+    that did not ask for the GPU, and PixelPainter's frame: 192,000 bytes at
+    320 × 200, 312,000 after a resize to 400 × 260.
+  - Wayland (headless sway): the `wl_shm` buffer the window committed equals
+    the CPU window's and PixelPainter's packed as ARGB8888 (1,920,000 bytes,
+    800 × 600; sway resized the toplevel from 320 × 200, so the renderer's
+    `Resize` ran live), and grim's capture of the output matches at all 480,000
+    pixels.
+  - Break check: flipping one bit of the copied frame fails both, naming the
+    byte.
+- **Assumption corrected: the target is already host-visible, so fallback 2 is
+  one memcpy, not a `vkCmdCopyBuffer` read-back.** G1's `Pixels()` is the mapped
+  target (it stayed host-visible); the window copies it into its own
+  framebuffer and the existing present path packs from there. The
+  `VK_EXT_external_memory_host` variant, which would remove that copy by
+  importing the shm mapping, was not tried (it needs a device that is not
+  lavapipe to mean anything).
+- **Assumption corrected: "the window already holds frames until `Wait`".** The
+  window calls `Draw` (`Submit` then `Wait`) once per frame: it does not use the
+  two frames in flight, because the present path needs the pixels before it can
+  commit. Overlapping the next frame's recording with the device is available
+  and not used yet.
+- **Assumption corrected: `Pixels()` is not zeroed.** The kernel composites over
+  the frame's current contents, and Vulkan promises nothing about fresh device
+  memory, so the window clears `Pixels()` when the path starts and after every
+  `Resize` (the contract already said the content is not kept). A translucent
+  theme background would otherwise differ from the CPU path.
+- **Assumption corrected: "other targets build a stub" for go-gfx/vulkan.** Its
+  constraint is `linux && (amd64 || arm64)`, and `GOOS=android` satisfies
+  `linux`, so the real binding is compiled on android/arm64, where purego has no
+  CGO-free `Dlopen` (`undefined: cgo.Dlopen`). window's `android` lane builds
+  CGO-free and caught it. The window works around it (the GPU path refuses on
+  android without importing `gpu2d/vulkan`); the constraint wants
+  `linux && !android && (amd64 || arm64)` in go-gfx/vulkan, with an android build
+  in its cross-build lane.
+- **The fallback is for good, as on Cocoa, not "for that frame".** A frame the
+  renderer refuses (`ErrTooLarge`, a lost device, a timeout, a frame of the wrong
+  size) releases the renderer, records the error (`GPUError`) and is drawn on
+  the CPU, as is every later frame. A refused `Resize` does the same. The first
+  CPU frame after a drop is a whole one even for an incremental root, because
+  the framebuffer was not kept current while the GPU drew. Vulkan absent
+  (`ErrUnsupported`) leaves the window on the CPU path from the start with the
+  reason in `GPUError`.
+- **sway, not weston, was the headless compositor.** It is the one the window's
+  Wayland CI lane already uses, it ran as an unprivileged user in the container
+  (it will not run as root), and it served `wl_shm` and the capture. weston was
+  not tried. Whether this sway's renderer (pixman in the lane) accepts dma-buf
+  buffers is **not examined**; L2's proof depends on it.
+- **Software numbers** (lavapipe, 16 threads, linux/arm64 container on the
+  M4 Max; 6 interleaved rounds under abbench `--max-load 8`, 30 frames, benchstat
+  medians; the host's 1-minute load stayed under 8; allocation counts are
+  exact). One whole frame painted and presented in a live window; `cpu` is the
+  process's CPU time per frame, every thread. A Wayland frame includes one round
+  trip with the compositor, the same for both paths.
+
+  | window | protocol | CPU path wall / cpu | GPU path wall / cpu | allocs/op CPU / GPU |
+  |---|---|---:|---:|---:|
+  | 960 × 640 | X11 | 2.47 ms / 2.48 ms | 3.62 ms / 25.8 ms | 30 / 89 |
+  | 960 × 640 | Wayland | 2.14 ms / 2.13 ms | 3.26 ms / 23.3 ms | 64 / 127 |
+  | 1920 × 1200 | X11 | 8.41 ms / 8.46 ms | 11.7 ms / 89.7 ms | 30 / 89 |
+  | 1920 × 1200 | Wayland | 7.75 ms / 7.71 ms | 10.5 ms / 86.9 ms | 64 / 128 |
+
+  Under lavapipe the GPU path costs about ten times the CPU time and 35 to
+  52 % more wall time than the CPU path, as it must: the "device" is a CPU
+  rasterizer and the copy is on top. Whether it pays on a real GPU, and whether
+  the copy is what remains, is for fractal. By the rule above (a Vulkan back-end
+  slower than the CPU path on the 7950X is an open defect) that comparison
+  decides.
+- **CI.** window gains a `live GPU (lavapipe, X11 + Wayland)` lane running the
+  same tests with `WINDOW_GPU_REQUIRE=1`, so a runner without a driver fails
+  instead of skipping.
+
 ## Risks
 
 1. **Biggest: identity across vendors.** The specifications permit
