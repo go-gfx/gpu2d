@@ -133,12 +133,21 @@ type Renderer struct {
 	info   vk.DeviceInfo
 	shader *vk.Shader
 	w, h   int
-	target *vk.Buffer
+	target *vk.Buffer // the frame the kernel draws into: device-local memory
+	stage  *vk.Buffer // host-visible copy of it, which is Pixels
+	xfer   *vk.CommandBuffer
 	slot   [slots]slot
 	rte    bool // the kernel declares RoundingModeRTE
 	head   int  // the oldest frame in flight
 	n      int  // frames in flight
 	closed bool
+
+	up       bool  // stage may differ from target: upload it before the next dispatch
+	devNewer bool  // target is ahead of stage: Pixels downloads it first
+	err      error // a download Pixels could not report, for the next call that can
+	inplace  bool  // bin straight into the slots' memory (see pack)
+
+	spans, list []uint32 // the binning's own storage, where it is not in place
 }
 
 // New opens the best Vulkan device and allocates a w × h frame.
@@ -188,9 +197,18 @@ func NewWith(w, h int, o Options) (*Renderer, error) {
 		r.Close()
 		return nil, tooLarge(err)
 	}
-	if r.target, err = r.dev.NewBuffer(4*uint64(w)*uint64(h), vk.UsageStorage); err != nil {
+	if err = r.newTarget(w, h); err != nil {
 		r.Close()
-		return nil, tooLarge(err)
+		return nil, err
+	}
+	// Bin in place only into memory the CPU may read back cheaply: a software
+	// rasterizer's. Binning counts into the spans, which reads them, and on a
+	// discrete GPU host-visible memory is write-combined: those reads cost 21.6
+	// ms a frame on a W7700 against 47 µs in ordinary memory (docs/NATIVE.md).
+	r.inplace = r.info.Type == vk.DeviceTypeCPU
+	if r.xfer, err = r.dev.NewCommandBuffer(); err != nil {
+		r.Close()
+		return nil, err
 	}
 	binds := []vk.Binding{
 		{Binding: bInst, Kind: vk.StorageBuffer}, {Binding: bBins, Kind: vk.StorageBuffer},
@@ -213,6 +231,29 @@ func NewWith(w, h int, o Options) (*Renderer, error) {
 		}
 	}
 	return r, nil
+}
+
+// newTarget allocates the device-local frame and its host-visible stage for a
+// w × h frame, replacing (and closing) the ones in use. The caller has waited
+// for every frame in flight. The new frame is to be uploaded from the stage.
+func (r *Renderer) newTarget(w, h int) error {
+	n := 4 * uint64(w) * uint64(h)
+	t, err := r.dev.NewDeviceBuffer(n, vk.UsageStorage|vk.UsageTransferSrc|vk.UsageTransferDst)
+	if err != nil {
+		return tooLarge(err)
+	}
+	st, err := r.dev.NewBuffer(n, vk.UsageTransferSrc|vk.UsageTransferDst)
+	if err != nil {
+		t.Close()
+		return tooLarge(err)
+	}
+	if r.target != nil {
+		r.target.Close()
+		r.stage.Close()
+	}
+	r.target, r.stage = t, st
+	r.up, r.devNewer = true, false
+	return nil
 }
 
 // tooLarge maps the binding's size refusal to gpu2d's, which is what a caller
@@ -254,10 +295,67 @@ func (r *Renderer) RoundingModeRTE() bool { return r.rte }
 // the second line of defence behind the kernel's in-range indices.
 func (r *Renderer) RobustBufferAccess() bool { return r.dev.RobustBufferAccess() }
 
-// Pixels is the frame, 4·w·h bytes of RGBA rows top to bottom. It is the
-// memory the device draws into: write the ground here before Draw and read the
-// result here after it.
-func (r *Renderer) Pixels() []byte { return r.target.Bytes() }
+// Pixels is the frame, 4·w·h bytes of RGBA rows top to bottom: write the ground
+// here before Draw and read the result here after it. It is a host-visible copy
+// of the frame, which lives in device-local memory: with no frame in flight,
+// Pixels first downloads whatever the device has drawn since the last call, and
+// assumes the caller may write, so the next Submit uploads it. Calling it costs
+// nothing when neither happened (a loop of Draw calls never calls it), and the
+// slice stays valid until Resize or Close. While frames are in flight it
+// returns the copy as it is and the device owns the frame: it is not current
+// until the last Wait. A download that fails is reported by the next call that
+// can (Sync, Submit, Draw).
+func (r *Renderer) Pixels() []byte {
+	if r.n == 0 && !r.closed {
+		if err := r.Sync(); err != nil && r.err == nil {
+			r.err = err
+		}
+		r.up = true
+	}
+	return r.stage.Bytes()
+}
+
+// Sync waits for every frame in flight and makes Pixels current: it downloads
+// the device's frame into it if the device is ahead. Pixels does as much,
+// without a way to return the error.
+func (r *Renderer) Sync() error {
+	if r.closed {
+		return vk.ErrClosed
+	}
+	var first error
+	for r.n > 0 {
+		if err := r.Wait(); err != nil && first == nil {
+			first = err
+		}
+	}
+	if first != nil || !r.devNewer {
+		return first
+	}
+	if err := r.xfer.Begin(); err != nil {
+		return err
+	}
+	// Order the copy after the last dispatch (finished, but cheap) and make the
+	// bytes visible to the host.
+	if err := r.xfer.Barrier(); err != nil {
+		return err
+	}
+	if err := r.xfer.Copy(r.stage, r.target, r.target.Size()); err != nil {
+		return err
+	}
+	if err := r.xfer.End(); err != nil {
+		return err
+	}
+	fe, err := r.dev.Submit(r.xfer)
+	if err != nil {
+		return err
+	}
+	defer fe.Close()
+	if err := r.finish(&slot{fence: fe}); err != nil {
+		return err
+	}
+	r.devNewer = false
+	return nil
+}
 
 // fit returns b if it holds n bytes, else a new buffer of at least n
 // (doubling, up to the device's limit), closing b.
@@ -320,6 +418,10 @@ func (r *Renderer) Submit(l *gpu2d.List) error {
 	if r.closed {
 		return vk.ErrClosed
 	}
+	if err := r.err; err != nil {
+		r.err = nil
+		return err
+	}
 	s, _, err := r.pack(l)
 	if err != nil {
 		return err
@@ -333,6 +435,16 @@ func (r *Renderer) Submit(l *gpu2d.List) error {
 	if err := s.cb.Barrier(); err != nil {
 		return err
 	}
+	if r.up {
+		// The host may have written the frame (the ground): send it, and order
+		// the dispatch after the copy.
+		if err := s.cb.Copy(r.target, r.stage, r.target.Size()); err != nil {
+			return err
+		}
+		if err := s.cb.Barrier(); err != nil {
+			return err
+		}
+	}
 	if err := s.cb.Dispatch(s.pipe, uint32((r.w+15)/16), uint32((r.h+7)/8), 1); err != nil {
 		return tooLarge(err)
 	}
@@ -345,6 +457,7 @@ func (r *Renderer) Submit(l *gpu2d.List) error {
 	}
 	s.fence = fe
 	r.n++
+	r.up, r.devNewer = false, true
 	return nil
 }
 
@@ -378,12 +491,10 @@ func (r *Renderer) Resize(w, h int) error {
 	if err := r.check(w, h); err != nil {
 		return err
 	}
-	t, err := r.dev.NewBuffer(4*uint64(w)*uint64(h), vk.UsageStorage)
-	if err != nil {
-		return tooLarge(err)
+	if err := r.newTarget(w, h); err != nil {
+		return err
 	}
-	r.target.Close()
-	r.target, r.w, r.h = t, w, h
+	r.w, r.h = w, h
 	for i := range r.slot {
 		r.slot[i].bound[bPixels] = nil
 	}
@@ -408,13 +519,16 @@ func (r *Renderer) pack(l *gpu2d.List) (*slot, frame, error) {
 	// had to grow past the buffer, and the grown buffer is reused afterwards.
 	ns := 2 * across * down
 	bw := words(s.bins)
-	var spans0, list0 []uint32
-	if len(bw) >= ns {
+	spans0, list0 := r.spans[:0], r.list[:0]
+	if r.inplace && len(bw) >= ns {
 		spans0, list0 = bw[:0:ns], bw[ns:]
 	}
 	spans, list, err := l.Bin(spans0, list0)
 	if err != nil {
 		return nil, frame{}, err
+	}
+	if !r.inplace {
+		r.spans, r.list = spans, list // kept for the next frame; place copies them
 	}
 	if s.bins, err = r.place(s.bins, spans, list); err != nil {
 		return nil, frame{}, err
@@ -481,9 +595,9 @@ func words(b *vk.Buffer) []uint32 {
 }
 
 // place makes buf hold spans followed by list. When both already live in buf
-// (Bin reused it) there is nothing to do; otherwise a larger buffer is
-// allocated and both are copied in, before the old one, which one of them may
-// live in, is closed.
+// (Bin reused it) there is nothing to do; when buf is large enough both are
+// copied in; otherwise a larger buffer is allocated and both are copied in,
+// before the old one, which one of them may live in, is closed.
 func (r *Renderer) place(buf *vk.Buffer, spans, list []uint32) (*vk.Buffer, error) {
 	v := words(buf)
 	if len(v) >= len(spans) && len(spans) > 0 && &v[0] == &spans[0] &&
@@ -491,6 +605,11 @@ func (r *Renderer) place(buf *vk.Buffer, spans, list []uint32) (*vk.Buffer, erro
 		return buf, nil
 	}
 	n := 4 * uint64(len(spans)+len(list))
+	if buf != nil && uint64(len(buf.Bytes())) >= n {
+		putWords(buf.Bytes(), spans)
+		putWords(buf.Bytes()[4*len(spans):], list)
+		return buf, nil
+	}
 	c := max(n, 4)
 	if buf != nil {
 		c = max(c, 2*uint64(len(buf.Bytes())))
@@ -545,6 +664,12 @@ func (r *Renderer) Close() {
 	}
 	if r.target != nil {
 		r.target.Close()
+	}
+	if r.stage != nil {
+		r.stage.Close()
+	}
+	if r.xfer != nil {
+		r.xfer.Close()
 	}
 	if r.shader != nil {
 		r.shader.Close()

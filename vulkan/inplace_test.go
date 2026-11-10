@@ -20,6 +20,9 @@ func TestPackBinsIntoTheSlotBuffers(t *testing.T) {
 		t.Skip("big-endian host: words is nil by design and every frame copies")
 	}
 	r := renderer(t, 1920, 1080)
+	if !r.inplace {
+		t.Skipf("%s: binning is not in place on a %v device (write-combined host memory: reading it back costs 450x)", r.Name(), r.Info().Type)
+	}
 	l, _ := gpu2d.NewList(1920, 1080)
 	gpu2d.WidgetFrame(l)
 	s, _, err := r.pack(l) // the first pack grows the buffers
