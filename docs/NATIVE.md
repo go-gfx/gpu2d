@@ -1008,7 +1008,7 @@ did.
 
 D4 has three parts: the swap chain in go-mswin/d3d11 (v0.3.0), `Present` in
 gpu2d's `d3d11` (this repository), and `Config.GPU` on Win32 in go-widgets/window
-(its outcome is recorded below once that pull request has run).
+(pull request go-widgets/window#161, whose outcome is under "The window" below).
 
 **What the Microsoft documentation says, and what it does not** (Microsoft Learn,
 opened 2026-11-10: "DXGI flip model", "For best performance, use DXGI flip model",
@@ -1058,6 +1058,27 @@ kernel with red and blue swapped, compiled in the test, gives max |Δ| 255 and
 245,376 channels differing. Two Presents in a row composite on the device;
 resize and refusals pass. go-mswin/d3d11's own tests, with a break check, show
 the same on the binding: `ResizeBuffers` fails while a back buffer is referenced.
+
+**The window** (go-widgets/window#161, `Config.GPU` on Win32, opt-in, mirroring
+the Cocoa and Linux paths: `gpuPath`, `startGPU` at `Run`, `presentGPU`,
+`resizeGPU`, `stopGPU`, `GPU`, `GPUError`, the CPU from then on). While the swap
+chain exists `WM_PAINT` only validates the update region, because a flip-model
+window shows only its swap chain; on any failure the swap chain and the device are
+released and GDI draws again.
+- **The live proof** (run 42899364318, `windows-latest`, a real window created by
+  the test and shown, gpu2d's WARP device): the back buffer, read through staging
+  just before the swap chain presents it, equals the frame `PixelPainter` draws
+  from the same widgets (translucent fills, rounded rectangles, strokes, text),
+  byte for byte, at 320 × 200 and again at 504 × 381 after a `SetWindowPos`
+  resize, whose `WM_SIZE` went through `onSize`, `Renderer.Resize` and
+  `SwapChain.Resize`. A device that will not start leaves the CPU path with
+  `GPUError`; a refused frame (injected) drops to the CPU, draws that frame there
+  and releases the swap chain.
+- **What it did not show.** Nothing looked at the screen: whether the runner's
+  session has a visible desktop is not known, so what the compositor displayed is
+  unobserved, and the proof reads the back buffer, which is what was handed to
+  `Present`. The runner's adapter is WARP; no Windows GPU has run any of D4.
+  Native child controls over a flip swap chain were not tried.
 
 **What this document got wrong or left out.**
 - **"UAV back buffer"** was an open question in the D4 row and in risk 6; on WARP
