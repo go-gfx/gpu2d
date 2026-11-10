@@ -930,53 +930,79 @@ not a GPU's.
   Submits; the second frame must not see it (it draws over the device's frame).
 
 **Upload and read-back (what was chosen).**
-- go-mswin/d3d11 v0.1.0 fills a structured buffer only at creation
-  (`BufferDesc.Initial`); `UpdateBuffer` accepts constant buffers only. So no
-  buffer is reused: each Submit creates the instance, bins and arena buffers
-  with their data and their SRVs, and releases them at Wait. The 16-byte frame
-  constant buffer is per slot and `UpdateBuffer`d.
-- `Pixels` is a host copy. With nothing in flight, Submit creates the target
-  (UAV, `Initial` = `Pixels`), because the caller may have written the ground
-  there; a second queued frame draws over the device's frame. The Wait that
-  ends the last frame waits for the device, copies the target to a staging
-  buffer, maps it and copies into `Pixels`.
+- **First version (go-mswin/d3d11 v0.1.0, merged as the first commit of #35):**
+  a structured buffer could be filled only at creation (`BufferDesc.Initial`)
+  and `UpdateBuffer` took constant buffers only, so each Submit created the
+  instance, bins and arena buffers and their SRVs, and the target from `Pixels`.
+- **Now (go-mswin/d3d11 v0.2.0, released from go-mswin/d3d11#2):** a slot keeps
+  its three input buffers across frames. They are `Dynamic` structured buffers,
+  written by `UpdateBuffer` (Map `WRITE_DISCARD`) and grown on demand like
+  metal's `fit` (doubling, up to the device limit, never shrinking). The choice
+  is from Microsoft Learn's D3D11_USAGE page (opened 2026-11-10): DYNAMIC is "a
+  good choice for a resource that will be updated by the CPU at least once per
+  frame", GPU read only and "yes" as an input to a stage; DEFAULT is the only
+  usage a stage can write, and its page and UpdateSubresource's say a dynamic
+  resource cannot be an `UpdateSubresource` destination. So the three inputs
+  (CPU-written every frame, read through SRVs) are DYNAMIC; the target (a UAV)
+  is DEFAULT, created once per size and filled in place by `UpdateSubresource`
+  when nothing is in flight. The 16-byte frame constant buffer is per slot.
+- `Pixels` is a host copy. The caller may have written the ground there, so with
+  nothing in flight Submit uploads it; a second queued frame draws over the
+  device's frame. The Wait that ends the last frame copies the target to a
+  staging buffer, maps it and copies into `Pixels`.
+- Each frame is flushed and fenced (`Context.Flush`, `Context.Signal`, one event
+  query per frame): Wait of the first of two frames waits for that frame.
 - Binning is not in place: `List.Bin` fills host slices kept per slot, written
-  as bytes into the buffer's initial data. (Metal and Vulkan bin straight into
+  as bytes into the slot's buffer. (Metal and Vulkan bin straight into
   device-visible memory; D3D11 has none.)
 - A frame past the buffer limit (`4·w·h` > limit, so 5793² on WARP), past 65535
   groups per dimension, or a slot buffer past the limit, is `gpu2d.ErrTooLarge`
   with nothing in flight; `Options.MaxBufferBytes` lowers the limit for the test.
 
-**Measured: WARP on a CI VM, never GPU speed** (4 vCPU runner, 20 iterations,
-one run, load unknown; `BenchmarkWidgetFrame`, `Stats` per frame):
+**Measured: WARP on a CI VM, never GPU speed** (4 vCPU `windows-latest`
+runner, 20 iterations, one run each, load unknown; `BenchmarkWidgetFrame`,
+`Stats` per frame). Before is the per-frame creation of v0.1.0 (run
+42846149477), after is buffer reuse and per-frame fences (run 42893588088):
 
-| frame | WARP, `Draw` | pack | target upload | device | read-back | CPU `Rasterize` (same run) |
-|---|---|---|---|---|---|---|
-| 1080p | 96.9 ms | 0.26 ms | 0.53 ms | 84.7 ms | 11.3 ms | 39.9 ms |
-| 4K | 370.4 ms | 1.21 ms | 2.57 ms | 348.7 ms | 17.9 ms | 161.5 ms |
+| frame | | WARP `Draw` | pack | target upload | device | read-back | CPU `Rasterize`, same run | allocs/op |
+|---|---|---|---|---|---|---|---|---|
+| 1080p | before | 96.9 ms | 0.256 ms | 0.529 ms | 84.7 ms | 11.3 ms | 39.9 ms | 227 |
+| 1080p | after | 112.2 ms | 0.089 ms | 0.368 ms | 103.3 ms | 8.4 ms | 54.8 ms | 203 |
+| 4K | before | 370.4 ms | 1.205 ms | 2.568 ms | 348.7 ms | 17.9 ms | 161.5 ms | 255 |
+| 4K | after | 440.7 ms | 0.898 ms | 1.955 ms | 416.3 ms | 21.4 ms | 221.6 ms | 238 |
 
-The copies (upload plus read-back) are 12 % of a 1080p frame and 5.5 % of a 4K
-one on WARP; on a discrete GPU they cross PCIe and will weigh more, which only
-a hardware run can say. WARP is 2.4x slower than the CPU reference on this
-runner: WARP is a software rasterizer, so this is not the verdict on the
-back-end, but it means the CI numbers say nothing about where D3D11 wins.
+What the change touches moved the right way on both sizes: packing, which was
+buffer creation, fell 65 % at 1080p and 25 % at 4K, and the target upload (an
+in-place `UpdateSubresource` instead of a creation) fell 30 % and 24 %. Those
+are 0.5 % of a frame, so the frame time does not show it: the device column
+(WARP's software rasterizing) is over 90 % of it and moved with the runner, which the
+CPU reference in each run shows (+37 % between the two runs of the same code).
+Relative to that reference, WARP went from 2.4x to 2.0x slower at 1080p and from
+2.3x to 2.0x at 4K, within what the runner's variance allows; none of it is a
+claim about a GPU. The copies (upload plus read-back) are about 8 % of a 1080p
+frame and 5 % of a 4K one on WARP; on a discrete GPU they cross PCIe and will
+weigh more, which only a hardware run can say. The read-back is a staging copy
+and a memcpy of the frame; it is unchanged in kind. Parity is still 0 of
+3,686,400 channels on both grounds, and the break checks still fail the way they
+did.
 
 **What this document got wrong or left out.**
 - **"In-place binning into GPU memory may not apply"** is confirmed: it does not.
-  The CPU-to-device copy is mandatory, and with v0.1.0 so is a buffer creation
-  per input per frame.
-- **No per-frame completion.** The binding's `Wait` is an event query on the
-  whole context, so `Wait` of the first of two frames cannot block on that frame
-  alone; it checks `RemovedReason` and gives the buffers back, and the Wait that
-  ends the last frame blocks. Nothing observable differs (Pixels is the device's
-  until then), but "two slots in flight" is two queued frames, not two fences.
-  There is also no `Flush`: queued commands start no later than that Wait.
+  The CPU-to-device copy is mandatory (a dynamic buffer written by `Map`).
+- **The binding was the gap, not Direct3D.** v0.1.0 had no way to update a
+  structured buffer, no `Flush`, and a `Wait` that was an event query on the
+  whole context. The first version of #35 worked round that (a buffer creation
+  per input per frame; the first of two Waits only checked `RemovedReason`).
+  v0.2.0 adds `Dynamic` buffers, `UpdateBuffer` on structured and raw buffers,
+  `Flush` and `Context.Signal`/`Fence`, and the back-end now reuses its buffers
+  and fences each frame. A CPU-written, shader-read input and a shader-written
+  target need two different usages, which the usage table dictates.
+- **Windows CI cannot say how much overlap there is.** A frame's fence passing is
+  proven (`TestFenceWaitsForItsOwnFrame` in go-mswin/d3d11); whether WARP or a
+  GPU starts frame 1 before frame 2 is queued is not measured here.
 - **`Software` is not the default.** `New` asks for a hardware adapter; the tests
   and CI pass `Options.Software` (WARP), and `D3D11_HARDWARE=1` selects the
   default adapter.
-- **go-mswin/d3d11 follow-ups:** `UpdateBuffer` on default structured and raw
-  buffers (`UpdateSubresource` is legal on them), and a `Flush`, would remove the
-  per-frame buffer creation and let a frame start before its Wait.
 
 ## Risks
 

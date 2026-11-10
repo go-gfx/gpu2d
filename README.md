@@ -312,16 +312,18 @@ window falls back to the CPU.
 Direct3D 11 has no persistently mapped, GPU-writable buffer, so `Pixels` is a
 host copy and `Draw` pays for two copies that Metal and Vulkan do not:
 
-- **Upload.** go-mswin/d3d11 v0.1.0 fills a structured buffer only when it is
-  created, so each frame creates its instance, bins and arena buffers with their
-  data, and, when nothing is in flight, the target from `Pixels` (the caller may
-  have written the ground there).
+- **Upload.** Each slot keeps its instance, bins and arena buffers across frames
+  (DYNAMIC structured buffers written with `Map` `WRITE_DISCARD`, grown on
+  demand, go-mswin/d3d11 v0.2.0), and, when nothing is in flight, the target is
+  filled in place from `Pixels` with `UpdateSubresource` (the caller may have
+  written the ground there).
 - **Read-back.** The `Wait` that ends the last frame copies the target to a
   staging buffer, maps it and copies it into `Pixels`.
 
 Frames queued with `Submit` stay on the device between them: the second
 composites over the first's result with no read-back, in submission order on the
-one immediate context. `Renderer.Stats` splits the wall time into packing,
+one immediate context. Each frame is flushed and fenced, so `Wait` of the first
+of two returns when that frame is done. `Renderer.Stats` splits the wall time into packing,
 target upload, device time and read-back; docs/NATIVE.md has the measured split.
 
 A frame past the device's buffer limit (guaranteed `min(max(128, 0.25 · VRAM),
