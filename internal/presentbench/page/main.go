@@ -9,7 +9,9 @@
 // requestAnimationFrame, and reports the time per frame in
 // window.__nsPerFrame. ?format=rgba configures the canvas as rgba8unorm
 // (Present copies), ?format=bgra as bgra8unorm (Present draws); ?w=&h= set
-// the size, ?frames= the frames timed after a warm-up.
+// the size, ?frames= the frames timed after a warm-up. ?mode=compute draws
+// with the compute kernel (webgpu.NewCompute) instead of fixed-function
+// blending.
 package main
 
 import (
@@ -72,7 +74,11 @@ func main() {
 		fail(err)
 		return
 	}
-	r, err := gpu2dwebgpu.New(ctx, d, w, h)
+	newRenderer := gpu2dwebgpu.New
+	if m := q.Call("get", "mode"); !m.IsNull() && m.String() == "compute" {
+		newRenderer = gpu2dwebgpu.NewCompute
+	}
+	r, err := newRenderer(ctx, d, w, h)
 	if err != nil {
 		fail(err)
 		return

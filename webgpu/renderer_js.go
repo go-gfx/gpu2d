@@ -42,7 +42,8 @@ type Renderer struct {
 	rec     *wg.Recorder
 	show    *presentPass // drawn into a bgra8unorm canvas; nil until needed
 	bytes   []byte
-	padded  []byte // the arena, padded to whole words
+	padded  []byte        // the arena, padded to whole words
+	c       *computeState // the compute mode (NewCompute); nil for the fixed-function one
 }
 
 // New builds the pipeline and a w × h target on d.
@@ -153,7 +154,9 @@ func (r *Renderer) fit(b *wg.Buffer, capacity, need uint64, label string) (*wg.B
 	return nb, c, nil
 }
 
-// Texture is the render target, for a caller that presents or samples it.
+// Texture is the render target, for a caller that presents or samples it. A
+// compute-mode renderer (NewCompute) keeps its pixels in a storage buffer and
+// returns nil: use Present and Read.
 func (r *Renderer) Texture() *wg.Texture { return r.target }
 
 // Draw composites the list over the target's current content, in one
@@ -162,6 +165,9 @@ func (r *Renderer) Texture() *wg.Texture { return r.target }
 func (r *Renderer) Draw(l *gpu2d.List, ground []byte) error {
 	if w, h := l.Size(); w != r.w || h != r.h {
 		return ErrSize
+	}
+	if r.c != nil {
+		return r.drawCompute(l, ground)
 	}
 	ins := l.Instances()
 	data := l.Data()
@@ -274,6 +280,9 @@ func (r *Renderer) Present(s *wg.Surface) error {
 	if w, h := s.Size(); w != r.w || h != r.h {
 		return ErrSize
 	}
+	if r.c != nil {
+		return r.presentCompute(s)
+	}
 	switch s.Format() {
 	case wg.TextureFormatRGBA8Unorm:
 	case wg.TextureFormatBGRA8Unorm:
@@ -328,6 +337,11 @@ func (r *Renderer) Destroy() {
 			b.Destroy()
 		}
 	}
+	if r.c != nil {
+		r.c.frame.Destroy()
+		r.c.bins.Destroy()
+		r.c.px.Destroy()
+	}
 	if r.target != nil {
 		r.target.Destroy()
 	}
@@ -336,5 +350,8 @@ func (r *Renderer) Destroy() {
 // Read copies the target back to Go memory: 4·w·h bytes, RGBA rows top to
 // bottom. It waits for the GPU; it is for tests and screenshots.
 func (r *Renderer) Read(ctx context.Context) ([]byte, error) {
+	if r.c != nil {
+		return r.readCompute(ctx)
+	}
 	return r.d.ReadTexture(ctx, wg.TexelCopyTextureInfo{Texture: r.target}, r.w, r.h, 4)
 }

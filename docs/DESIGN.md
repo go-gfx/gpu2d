@@ -158,6 +158,13 @@ go-widgets/painter, and the adapter of milestone 5 applies the translation.
    `TestCoverageMetalIsGenerated` catches drift). The coverage now exists in
    Go and WGSL, each held to the CPU reference by test.
 
+7. K0 of [NATIVE.md](NATIVE.md): `kernel.wgsl`, the raster kernel as one WGSL
+   compute shader, and `webgpu.NewCompute` that draws with it. Byte-identical
+   to `Rasterize` over an opaque and a translucent ground in Chromium on an
+   M4 Max, which closes the "alpha up to 4" gap above for this mode. Opt-in:
+   the fixed-function path stays the default until the measurement table in
+   the pull request is decided on.
+
 ## Sources opened
 
 - WebGPU specification, gpuweb/gpuweb `spec/index.bs`: Blend State

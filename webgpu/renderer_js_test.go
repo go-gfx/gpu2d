@@ -8,6 +8,7 @@ package webgpu
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -76,15 +77,53 @@ func TestMatchesReference(t *testing.T) {
 	}
 }
 
+// diff is what a comparison against Rasterize found, per channel R, G, B, A.
+type diff struct {
+	worst, differing [4]int
+	channels, drawn  int
+	firstBad         string // the first channel off by more than 1, for a message
+	seeds            int
+}
+
 func compare(t *testing.T, ctx context.Context, r *Renderer, ground []byte, seeds int, alphaFree bool) {
+	t.Helper()
+	d := measure(t, ctx, r, ground, seeds, alphaFree)
+	d.report(t)
+	d.drawsEnough(t, 10)
+	if d.firstBad != "" {
+		t.Error(d.firstBad)
+	}
+}
+
+func (d diff) report(t *testing.T) {
+	t.Helper()
+	for ch, name := range []string{"R", "G", "B", "A"} {
+		t.Logf("%s: max |Δ| %d, %d of %d pixels differ (%.4f%%)", name, d.worst[ch], d.differing[ch], d.channels,
+			100*float64(d.differing[ch])/float64(d.channels))
+	}
+	t.Logf("%d scenes, %d instances", d.seeds, d.drawn)
+}
+
+// drawsEnough fails a comparison whose scenes barely draw: it proves nothing.
+func (d diff) drawsEnough(t *testing.T, perScene int) {
+	t.Helper()
+	if d.drawn < d.seeds*perScene {
+		t.Fatalf("only %d instances in %d scenes: the scenes barely draw", d.drawn, d.seeds)
+	}
+}
+
+// measure renders the random scenes on r and on the CPU from the same ground.
+// alphaFree excuses alpha from firstBad.
+func measure(t *testing.T, ctx context.Context, r *Renderer, ground []byte, seeds int, alphaFree bool) diff {
+	t.Helper()
 	w, h := r.w, r.h
-	var worst [4]int
-	var differing [4]int
-	var channels, drawn int
+	out := diff{seeds: seeds}
+	worst, differing := &out.worst, &out.differing
+	channels, drawn := &out.channels, &out.drawn
 	for seed := range uint64(seeds) {
 		l, _ := gpu2d.NewList(w, h)
 		scenes.Random(l, seed, 40)
-		drawn += len(l.Instances())
+		*drawn += len(l.Instances())
 		want := append([]byte(nil), ground...)
 		if err := l.Rasterize(want); err != nil {
 			t.Fatal(err)
@@ -99,7 +138,7 @@ func compare(t *testing.T, ctx context.Context, r *Renderer, ground []byte, seed
 		for i := range want {
 			ch := i % 4
 			if ch == 0 {
-				channels++
+				*channels++
 			}
 			dlt := int(want[i]) - int(got[i])
 			if dlt < 0 {
@@ -110,21 +149,14 @@ func compare(t *testing.T, ctx context.Context, r *Renderer, ground []byte, seed
 			}
 			if dlt > worst[ch] {
 				worst[ch] = dlt
-				if dlt > 1 && !(alphaFree && ch == 3) {
+				if dlt > 1 && !(alphaFree && ch == 3) && out.firstBad == "" {
 					p := i / 4
-					t.Errorf("seed %d (%d,%d) channel %d: CPU %d, GPU %d", seed, p%w, p/w, ch, want[i], got[i])
+					out.firstBad = fmt.Sprintf("seed %d (%d,%d) channel %d: CPU %d, GPU %d", seed, p%w, p/w, ch, want[i], got[i])
 				}
 			}
 		}
 	}
-	for ch, name := range []string{"R", "G", "B", "A"} {
-		t.Logf("%s: max |Δ| %d, %d of %d pixels differ (%.4f%%)", name, worst[ch], differing[ch], channels,
-			100*float64(differing[ch])/float64(channels))
-	}
-	t.Logf("%d scenes, %d instances", seeds, drawn)
-	if drawn < seeds*10 {
-		t.Fatalf("only %d instances: the scenes barely draw", drawn)
-	}
+	return out
 }
 
 // The shared widget frame on the GPU, and the same frame on the CPU in wasm:
@@ -138,22 +170,27 @@ func BenchmarkWidgetFrame(b *testing.B) {
 	}{{"1080p", 1920, 1080}, {"4K", 3840, 2160}} {
 		l, _ := gpu2d.NewList(s.w, s.h)
 		gpu2d.WidgetFrame(l)
-		b.Run("gpu/"+s.name, func(b *testing.B) {
-			d, ctx := benchDevice(b)
-			r, err := New(ctx, d, s.w, s.h)
-			if err != nil {
-				b.Fatal(err)
-			}
-			b.ReportMetric(float64(len(l.Instances())), "instances")
-			for b.Loop() {
-				if err := r.Draw(l, nil); err != nil {
+		for _, m := range []struct {
+			name string
+			new  func(context.Context, *wg.Device, int, int) (*Renderer, error)
+		}{{"gpu", New}, {"compute", NewCompute}} {
+			b.Run(m.name+"/"+s.name, func(b *testing.B) {
+				d, ctx := benchDevice(b)
+				r, err := m.new(ctx, d, s.w, s.h)
+				if err != nil {
 					b.Fatal(err)
 				}
-				if err := d.Queue().OnSubmittedWorkDone(ctx); err != nil {
-					b.Fatal(err)
+				b.ReportMetric(float64(len(l.Instances())), "instances")
+				for b.Loop() {
+					if err := r.Draw(l, nil); err != nil {
+						b.Fatal(err)
+					}
+					if err := d.Queue().OnSubmittedWorkDone(ctx); err != nil {
+						b.Fatal(err)
+					}
 				}
-			}
-		})
+			})
+		}
 		b.Run("cpu-wasm/"+s.name, func(b *testing.B) {
 			buf := make([]byte, 4*s.w*s.h)
 			for b.Loop() {
@@ -163,7 +200,14 @@ func BenchmarkWidgetFrame(b *testing.B) {
 	}
 }
 
+// benchSoftware remembers a software adapter: the benchmarks after the first
+// skip without asking the browser for another one.
+var benchSoftware bool
+
 func benchDevice(b *testing.B) (*wg.Device, context.Context) {
+	if benchSoftware {
+		b.Skip("fallback adapter: no GPU to measure")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	b.Cleanup(cancel)
 	nav, err := wg.Navigator()
@@ -177,6 +221,7 @@ func benchDevice(b *testing.B) (*wg.Device, context.Context) {
 		b.Fatal(err)
 	}
 	if a.Info().Fallback {
+		benchSoftware = true
 		b.Skip("fallback adapter: no GPU to measure")
 	}
 	d, err := a.RequestDevice(ctx, &wg.DeviceDescriptor{Label: b.Name()})
