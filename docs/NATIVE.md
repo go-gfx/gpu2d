@@ -576,8 +576,10 @@ changed in this design:
   - `maxStorageBufferRange` is guaranteed only at 2^27 bytes, and
     `maxMemoryAllocationSize` at 2^30 (Vulkan Limits table). `MaxData` is
     2^28. `MaxBinned` entries take 2^28 bytes as `u32`.
-  - The D3D11 buffer-size limit is still to be read: it is an **open item**,
-    not yet opened.
+  - The D3D11 buffer-size limit is
+    `min(max(128, 0.25 · dedicated VRAM), 2048)` MB, guaranteed: 128 MiB
+    (2^27 bytes, the same as Vulkan's `maxStorageBufferRange` floor) on WARP
+    and any adapter under 512 MiB. See "Outcomes of D1".
 - **32-bit arithmetic in the kernel.**
   - A pixel index `y·w + x` fits in `u32` because the target is bounded by
     `maxStorageBufferRange`.
@@ -587,9 +589,9 @@ changed in this design:
   - The `u32(f32)` conversion is range-proved: the value is in [0, 255.5].
 - **Out-of-bounds GPU access.** Every index the kernel reads comes from the
   CPU (`Bin`, recorded offsets), not from a guest shader. The Vulkan
-  back-end enables `robustBufferAccess` when offered, as a second line. What
-  D3D11 guarantees for out-of-range buffer reads is an **open item**, not yet
-  opened.
+  back-end enables `robustBufferAccess` when offered, as a second line. On
+  D3D11 an out-of-range structured-buffer **index** reads 0, but an
+  out-of-range byte offset inside a struct is undefined. See "Outcomes of D1".
 - **No untrusted shader enters the path.** The kernel is fixed and generated
   at build time, so go-wgsl's "not a security boundary" caveat does not
   apply.
@@ -781,6 +783,55 @@ Nothing below is a statement about a GPU.
   same tests with `WINDOW_GPU_REQUIRE=1`, so a runner without a driver fails
   instead of skipping.
 
+### Outcomes of D1 (2026-11-10)
+
+`github.com/go-mswin/d3d11` v0.1.0 (PR #1) is released, with packages `dxgi`
+and `d3dcompiler`. Pure Go, no cgo. On windows-latest, a **WARP** device
+("Microsoft Basic Render Driver", feature level 11_1) dispatches a fill shader
+and the staging read-back holds the expected bytes. No GPU has run it.
+
+**Proof.** The break check passes: with the UAV bound at the wrong slot the
+same dispatch leaves the buffer zero and the comparison fails. A raw
+(`ByteAddressBuffer`) SRV/UAV dispatch matches too. Every COM object is counted,
+and the count returns to zero after each test, error paths included. The D1
+row says "windows-latest CI on WARP"; that is what is proven, nothing more.
+
+**The two open items.** Source: Direct3D 11.3 Functional Specification
+(microsoft.github.io/DirectX-Specs, opened 2026-11-10).
+- **Buffer size.** `min(max(A, B · VRAM), C)` MB with
+  `D3D11_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_A_TERM` = 128,
+  `_B_TERM` = 0.25f, `_C_TERM` = 2048. It is a required minimum, not a ceiling.
+  WARP reports no dedicated memory, so its limit is 128 MiB (a 128 MiB buffer
+  was created in CI). 2048 MiB needs 8 GiB of VRAM. Constant buffers are
+  limited to 4096 four-component elements (64 KiB). `MaxData` (2^28) and
+  `MaxBinned` (2^28 bytes) exceed the 128 MiB floor, so a frame is refused with
+  `ErrTooLarge` as on Vulkan, unless the device's limit is higher.
+- **Out-of-bounds reads.** `ld_structured` (22.4.12): an out-of-bounds read of
+  `t#` or `u#` returns 0 per 32-bit component, "except: if srcByteOffset (plus
+  swizzle) is what causes out of bounds access … the returned value … is
+  undefined". So an out-of-range struct index reads 0 and an out-of-range byte
+  offset inside a struct is undefined. `ld_raw` returns 0 without the
+  exception. Out-of-bounds struct-index writes are dropped. WARP returned 0 for
+  an out-of-range index. The kernel never relies on either: every index comes
+  from the CPU.
+
+**What this document got wrong or left out.**
+- **Windows layer:** Decision 2 says d3d11 builds on go-mswin/win32. It needs
+  only `golang.org/x/sys/windows`, and that is all it imports.
+- **DXBC route:** the table says `go generate` on Windows. The module has no
+  `go generate`: `TestDXBCNotDrifted` recompiles with `D3DCompile`
+  (`d3dcompiler_47.dll`, through syscall; not `fxc.exe`) and compares. With
+  `D3D11_DXBC_OUT` set it writes the fresh bytes, and CI uploads them as an
+  artifact. That is how the committed files were made.
+- **Drift risk:** DXBC depends on the runner's `d3dcompiler_47.dll`. If the
+  image updates it, the drift test goes red until the files are regenerated.
+- **DXGI:** WARP appears twice in the adapter enumeration, once with the
+  software flag clear and once with it set, both named "Microsoft Basic Render
+  Driver". A device made with `D3D_DRIVER_TYPE_WARP` reports the software one.
+- **A slot list is not enough.** The first WARP run failed with `E_INVALIDARG`
+  because `D3D11_QUERY_EVENT` is enumerator 0, not 1: enumerator values need
+  the same anchors as vtable slots.
+
 ## Risks
 
 1. **Biggest: identity across vendors.** The specifications permit
@@ -895,7 +946,9 @@ Taken as proposed, open to objection:
   - `DXGI_SWAP_CHAIN_DESC1`, `DXGI_USAGE`, "DXGI flip model";
   - "WARP Guide";
   - HLSL "Variable syntax" (`precise`), "D3DCOMPILE Constants";
-  - Direct3D 11.3 Functional Specification §3.1.3 (32-bit floating point).
+  - Direct3D 11.3 Functional Specification §3.1.3 (32-bit floating point),
+    the resource-size constants and limits table, and 22.4.10-22.4.13
+    (`ld_raw`, `store_raw`, `ld_structured`, `store_structured`).
 - **Chuck Walbourn,** "HLSL, FXC, and D3DCompile" (d3dcompiler_47 in-box,
   build-time compilation recommended).
 - **ebitengine/purego** README: platform tiers, structs by value, CGO_ENABLED=0.
