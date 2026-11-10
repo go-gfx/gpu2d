@@ -601,6 +601,63 @@ changed in this design:
   plus size from the compositor, so it is untrusted and size-bounded) and the
   DRI3 / Present replies. `vkgen`'s registry reader is fuzzed too.
 
+### Outcomes of G1 (2026-11-10)
+
+G1 is done except what needs fractal: package `vulkan` (go-gfx/gpu2d, this
+pull request) over go-gfx/vulkan v0.1.0 and go-gfx/wgsl v0.8.0. **Pending, because
+fractal has been down since 2026-11-10 10:00:** the RADV run on the W7700 and the
+fractal benchmarks. Nothing below is a statement about a GPU.
+
+- **Parity on lavapipe, in CI.** `TestMatchesReference` (300 random scenes,
+  4,769 instances, over an opaque and a translucent ground) finds **max |Δ| 0
+  and 0 of 3,686,400 channels** differing on each ground, on llvmpipe
+  (LLVM 19.1.7, Mesa 25.0.7), with the validation layer on and no message.
+  The two-frames-in-flight composition test (50 rounds, byte for byte), the
+  copy-semantics test and the in-place binning test pass.
+- **Break check.** The kernel regenerated with the red channel's rounding
+  perturbed (`+ 127u` becomes `+ 100u`) fails parity: max |Δ| 2, 6,936
+  channels differ in 60 scenes (`TestBreakCheckPerturbedBlend`). The pixels'
+  descriptor pointed at a decoy leaves `Pixels` untouched and draws on the
+  decoy (`TestBreakCheckWrongBuffer`).
+- **Generated, with a drift test.** `vulkan/kernel_gen.spv` (12,608 bytes) comes
+  from `internal/spirvgen`; `.gitattributes` marks it binary.
+- **Wrong assumption: two frames in flight overlap on the device.** Each frame
+  composites over the previous one's pixels, so they cannot, whatever the
+  queue does. What overlaps is the CPU packing of frame B with the device's
+  frame A. And go-gfx/vulkan v0.1.0 records its only barrier *after* the
+  dispatch (`compute -> host`): a second submission has no memory dependency
+  on the first. `Submit` therefore waits for the previous frame's fence on the
+  host before it queues the next one. The fix belongs in the binding (a
+  leading `compute -> compute` barrier); filing it was not done from this
+  session (the draft is in the pull request description).
+- **Wrong assumption: "RTE when the device reports it".** The binding does not
+  report `shaderRoundingModeRTEFloat32`, so the module is generated without
+  `RoundingModeRTE` (every float operation keeps `NoContraction`). Identity on
+  lavapipe holds without it; whether RADV's hardware needs it is for fractal.
+- **Wrong assumption: `robustBufferAccess` "enabled when offered".** The
+  binding creates the device without features. The kernel's indices are in
+  range by construction, as on Metal; the second line is not there yet.
+- **Wrong assumption: device-local target.** The binding's buffers are all
+  host-visible and coherent, so the target lives in PCIe-visible memory on a
+  discrete GPU. Unmeasured; a device-local target with a copy is a binding
+  feature if fractal shows it matters.
+- **One descriptor set per `Pipeline`** in the binding, so each slot has its
+  own pipeline and command buffer, and a slot rebinds a buffer only when it
+  was replaced (growth, `Resize`).
+- **Limits are real on lavapipe.** It reports `maxStorageBufferRange`
+  134,217,728 (2^27, the guaranteed minimum) and `maxComputeWorkGroupCount`
+  65,535, so `ErrTooLarge` is tested against live limits at `New`, `Resize` and
+  a slot buffer: a target past 2^27 bytes is refused, 1080p and 4K are not.
+  Slot buffers double up to the device's range, never past it.
+- **Without a loader the package skips, not fails**, unless `VULKAN_REQUIRE=1`;
+  it builds and vets on windows, js/wasm and 386 (the binding returns
+  `ErrUnsupported` there).
+
+**Software benchmarks (lavapipe in a linux/arm64 container on the M4 Max host;
+not GPU speed).** See the table below.
+
+BENCH_PLACEHOLDER
+
 ## Risks
 
 1. **Biggest: identity across vendors.** The specifications permit

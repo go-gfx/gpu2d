@@ -172,6 +172,16 @@ go-widgets/painter, and the adapter of milestone 5 applies the translation.
    texture, which the emitter does not. The Metal Renderer's slots hold the
    tiles' spans and list in one buffer, as the kernel binds them. Still
    byte-identical to `Rasterize`; no slower than the hand-written kernel.
+9. G1 of NATIVE.md: package `vulkan`, the Metal back-end's shape over
+   go-gfx/vulkan. `vulkan/kernel_gen.spv` comes from `kernel.wgsl` through
+   `internal/spirvgen` and go-gfx/wgsl v0.8.0's `spirv.Module`
+   (`TestKernelSPIRVIsGenerated` catches drift). A slot holds the same buffers
+   as Metal's (instances, one `bins` buffer binned in place, the arena, a frame
+   uniform) plus its own pipeline and command buffer, since go-gfx/vulkan gives
+   a pipeline one descriptor set. The target is a host-visible buffer. On
+   lavapipe it is byte-identical to `Rasterize` on both grounds. Frames
+   composite over one target, so the device never runs two at once: the host
+   waits for the first fence before it queues the second.
 
 ## Sources opened
 
