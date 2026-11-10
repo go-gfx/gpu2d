@@ -6,3 +6,5 @@ metal/kernel_gen.metal text eol=lf
 # it shares its coverage functions with; keep it LF too.
 kernel.wgsl text eol=lf
 webgpu/shader.wgsl text eol=lf
+# kernel_gen.spv is compared byte for byte with what the generator writes.
+vulkan/kernel_gen.spv binary

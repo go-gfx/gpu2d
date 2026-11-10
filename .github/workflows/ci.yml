@@ -36,6 +36,50 @@ jobs:
       - name: parity with go-widgets/painter
         run: go -C internal/parity test -count=1 ./...
 
+  # The Vulkan back-end on lavapipe (Mesa's software Vulkan) with the Khronos
+  # validation layer, as in go-gfx/vulkan's CI. lavapipe and the layer are
+  # oracles only. VULKAN_REQUIRE=1 turns a missing loader or device into a
+  # failure, so the lane cannot go green by skipping; VULKAN_VALIDATION=1 makes
+  # the tests capture stdout and stderr and fail on ANY validation message. The
+  # test binary is built CGO_ENABLED=0 (cross-compile, then run), the way it
+  # runs on a machine without a C toolchain. These are software numbers: they
+  # prove the bindings, the generated kernel and byte identity under lavapipe's
+  # arithmetic, not speed or a GPU's.
+  vulkan:
+    name: vulkan, lavapipe + validation layer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: install lavapipe and the validation layer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-validationlayers vulkan-tools libvulkan1
+      - name: the devices the loader sees
+        run: vulkaninfo --summary
+      - name: parity and composition tests, validation layer on, CGO_ENABLED=0 test binary
+        env:
+          CGO_ENABLED: "0"
+          VULKAN_REQUIRE: "1"
+          VULKAN_VALIDATION: "1"
+        run: |
+          go test -c -o vulkan.test ./vulkan
+          ./vulkan.test -test.v -test.count=1
+      - name: tests without the layer, race detector
+        env:
+          VULKAN_REQUIRE: "1"
+        run: go test -race -count=1 -v ./vulkan
+      - name: benchmarks run (once each; shared runners' timings are not results)
+        env:
+          VULKAN_REQUIRE: "1"
+        run: go test -count=1 -run '^$' -bench . -benchtime 1x ./vulkan
+
   linux-386:
     runs-on: ubuntu-latest
     steps:

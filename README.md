@@ -7,9 +7,10 @@ pixel, and each GPU back-end is checked against it.
 
 **Status: milestone 4 of 6 ([docs/DESIGN.md](docs/DESIGN.md)).** The instance
 list, the CPU reference, the WebGPU back-end (package `webgpu`, browser) and
-the Metal back-end (package `metal`, macOS) exist, for rectangles, glyph
-masks, images and paths. The go-widgets adapter comes next. Linux (Vulkan)
-and Windows (Direct3D 11) are designed, not built:
+the Metal back-end (package `metal`, macOS) and the Vulkan back-end (package
+`vulkan`, Linux, proven on lavapipe) exist, for rectangles, glyph masks,
+images and paths. The go-widgets adapter comes next. Presentation on Linux and
+Windows (Direct3D 11) are designed, not built:
 [docs/NATIVE.md](docs/NATIVE.md).
 
 ## Measured
@@ -242,6 +243,43 @@ WGSL the WebGPU compute mode runs, so the raster arithmetic exists once.
 `TestKernelMetalIsGenerated` fails on a stale file, and `TestMatchesReference`
 still finds 0 differing channels on both grounds. Only the present kernel
 (`metal/present.metal`) is hand-written, since it writes a texture.
+
+## Vulkan (package `vulkan`, Linux)
+
+```go
+r, err := vulkan.New(w, h) // errors.Is(err, vulkan.ErrUnsupported) without a Vulkan loader
+copy(r.Pixels(), ground)
+err = r.Draw(list)         // Submit, then Wait; r.Pixels() holds the frame
+```
+
+The same shape as `metal`: `New(w, h)` (and `NewWith` for validation or a
+vendor filter), `Draw`, `Submit` and `Wait` over two slots, `Pixels`, `Resize`,
+`Close`, `Name`, and `ErrBusy`, `ErrNothingInFlight` and `ErrSize`. Frames
+composite in submission order over one target. There is no presentation yet
+(milestone L1 of [docs/NATIVE.md](docs/NATIVE.md)).
+
+It runs the same raster kernel through go-gfx/vulkan (pure Go, no cgo, 64-bit
+Linux): `vulkan/kernel_gen.spv` is generated from `kernel.wgsl`
+(`go generate ./vulkan`) by go-gfx/wgsl's `spirv` package, and
+`TestKernelSPIRVIsGenerated` fails on a stale file on every platform. The
+buffers are host-visible and coherent, so `List.Bin` bins straight into the
+slot's buffer, as on Metal. Elsewhere, and where no loader is installed, `New`
+returns an error satisfying `errors.Is(err, vulkan.ErrUnsupported)`.
+
+A frame past a device limit (`maxStorageBufferRange`, guaranteed only at
+2^27 bytes, or `maxComputeWorkGroupCount`) is refused with `gpu2d.ErrTooLarge`
+before anything is dispatched.
+
+CI runs the package on lavapipe (Mesa's software Vulkan) with the Khronos
+validation layer, failing on any message. `TestMatchesReference` finds 0
+differing channels on both grounds there; lavapipe proves the bindings and the
+kernel, not the arithmetic or the speed of a GPU. The tests honour
+`VULKAN_REQUIRE=1`, `VULKAN_VALIDATION=1` and `VULKAN_VENDOR=0x1002`.
+
+Two frames cannot overlap on the device, since each composites over the
+previous one's pixels: `Submit` packs the second frame while the first runs,
+then waits for the first before it queues the second, because go-gfx/vulkan
+v0.1.0 records no barrier between submissions.
 
 ## Bounds
 
