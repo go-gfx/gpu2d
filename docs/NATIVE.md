@@ -604,7 +604,8 @@ changed in this design:
 ### Outcomes of G1 (2026-11-10)
 
 G1 is done except what needs fractal: package `vulkan` (go-gfx/gpu2d, this
-pull request) over go-gfx/vulkan v0.1.0 and go-gfx/wgsl v0.8.0. **Pending, because
+pull request) over go-gfx/vulkan (v0.1.0 at first, v0.2.0 since the overlap change below) and
+go-gfx/wgsl v0.8.0. **Pending, because
 fractal has been down since 2026-11-10 10:00:** the RADV run on the W7700 and the
 fractal benchmarks. Nothing below is a statement about a GPU.
 
@@ -619,28 +620,49 @@ fractal benchmarks. Nothing below is a statement about a GPU.
   channels differ in 60 scenes (`TestBreakCheckPerturbedBlend`). The pixels'
   descriptor pointed at a decoy leaves `Pixels` untouched and draws on the
   decoy (`TestBreakCheckWrongBuffer`).
-- **Generated, with a drift test.** `vulkan/kernel_gen.spv` (12,608 bytes) comes
-  from `internal/spirvgen`; `.gitattributes` marks it binary.
-- **Wrong assumption: two frames in flight overlap on the device.** Each frame
-  composites over the previous one's pixels, so they cannot, whatever the
-  queue does. What overlaps is the CPU packing of frame B with the device's
-  frame A. And go-gfx/vulkan v0.1.0 records its only barrier *after* the
-  dispatch (`compute -> host`): a second submission has no memory dependency
-  on the first. `Submit` therefore waits for the previous frame's fence on the
-  host before it queues the next one. The fix belongs in the binding (a
-  leading `compute -> compute` barrier); filing it was not done from this
-  session (the draft is in the pull request description).
-- **Wrong assumption: "RTE when the device reports it".** The binding does not
-  report `shaderRoundingModeRTEFloat32`, so the module is generated without
-  `RoundingModeRTE` (every float operation keeps `NoContraction`). Identity on
-  lavapipe holds without it; whether RADV's hardware needs it is for fractal.
-- **Wrong assumption: `robustBufferAccess` "enabled when offered".** The
-  binding creates the device without features. The kernel's indices are in
-  range by construction, as on Metal; the second line is not there yet.
-- **Wrong assumption: device-local target.** The binding's buffers are all
-  host-visible and coherent, so the target lives in PCIe-visible memory on a
-  discrete GPU. Unmeasured; a device-local target with a copy is a binding
-  feature if fractal shows it matters.
+- **Generated, with a drift test.** `vulkan/kernel_gen.spv` (12,608 bytes) and
+  `vulkan/kernel_rte_gen.spv` (12,632 bytes) come from `internal/spirvgen`;
+  `.gitattributes` marks them binary.
+- **Wrong assumption, then fixed: two frames in flight.** go-gfx/vulkan v0.1.0
+  records its only barrier *after* the dispatch (`compute -> host`), so a
+  second submission had no memory dependency on the first, and the first
+  version of this back-end (v0.9.0) made `Submit` wait for the previous
+  frame's fence on the host: the frames were queued one at a time. go-gfx/vulkan
+  v0.2.0 adds `CommandBuffer.Barrier`, a compute/transfer memory barrier. The
+  specification (`vkCmdPipelineBarrier`) defines both its scopes in submission
+  order ("all commands that occur earlier ... later in submission order") and
+  a memory dependency between commands "submitted to the same queue" before and
+  after it, so a barrier at the start of each frame's command buffer orders its
+  dispatch after the previous frame's writes with no semaphore. `Submit` no
+  longer waits on a fence: on lavapipe, with 1920 x 2834 frames, the second
+  `Submit` returns in about 40 µs while the first frame is still running (its
+  fence is not signalled, `TestFramesReallyOverlap`), and the two-frame
+  composite is the CPU's, byte for byte. The frames still run one after the
+  other on the device, since each composites over the other's pixels; what
+  overlaps is the queueing and the CPU packing.
+- **The barrier's break check is the binding's.** The validation layer's
+  synchronization validation (1.4.309, lavapipe) reported no hazard between
+  compute dispatches for this kernel, only between copies, so gpu2d cannot
+  fail on a missing barrier here; go-gfx/vulkan's `TestBreakMissingBarrier`
+  shows two unordered submissions drawing a `SYNC-HAZARD`, clean once the
+  second begins with `Barrier`. lavapipe also runs its queue serially, so a race
+  would not show; a real GPU is where it matters (fractal, pending).
+- **RTE is now used where offered.** go-gfx/vulkan v0.2.0 reports
+  `shaderRoundingModeRTEFloat32` (`DeviceInfo.RoundingModeRTEFloat32`). The
+  renderer runs `vulkan/kernel_rte_gen.spv`, the same kernel with the
+  `RoundingModeRTE` execution mode declared (every float operation keeps
+  `NoContraction`), on a device that reports it, and `kernel_gen.spv`
+  elsewhere. lavapipe reports it: parity is **max |Δ| 0 with both modules**
+  (`Options.NoRTE` selects the plain one in the tests). Whether the mode
+  changes anything on RADV's hardware is for fractal.
+- **`robustBufferAccess` is enabled where offered**, by go-gfx/vulkan v0.2.0's
+  `Open` (`Renderer.RobustBufferAccess`); lavapipe offers it. It is the second
+  line behind the kernel's in-range indices, as the bounds section promised.
+- **Device-local target: not decided.** The binding now has device-local
+  buffers and a staging `Copy`, but a lavapipe has one memory type that is both
+  host-visible and device-local, so it cannot show whether a device-local target
+  with a copy beats a mapped one, and no discrete GPU is reachable (fractal is
+  down). The target stays host-visible; to be measured on the W7700.
 - **One descriptor set per `Pipeline`** in the binding, so each slot has its
   own pipeline and command buffer, and a slot rebinds a buffer only when it
   was replaced (growth, `Resize`).
@@ -653,7 +675,9 @@ fractal benchmarks. Nothing below is a statement about a GPU.
   it builds and vets on windows, js/wasm and 386 (the binding returns
   `ErrUnsupported` there).
 
-**Software benchmarks.** These are lavapipe (llvmpipe, 16 threads) in a
+**Software benchmarks** (taken on v0.9.0, before the overlap change, which
+adds one recorded command per frame and removes a wait; not re-measured, so
+`Submit` in particular may differ). These are lavapipe (llvmpipe, 16 threads) in a
 linux/arm64 container on the M4 Max host: **a CPU rasterizer's speed, not a
 GPU's**, and not comparable with the Metal figures in DESIGN.md. Three
 interleaved rounds (`WidgetFrame`, `Submit`, `WidgetFrame`, ...), 30

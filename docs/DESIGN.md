@@ -180,8 +180,11 @@ go-widgets/painter, and the adapter of milestone 5 applies the translation.
    uniform) plus its own pipeline and command buffer, since go-gfx/vulkan gives
    a pipeline one descriptor set. The target is a host-visible buffer. On
    lavapipe it is byte-identical to `Rasterize` on both grounds. Frames
-   composite over one target, so the device never runs two at once: the host
-   waits for the first fence before it queues the second.
+   composite over one target, so the device runs them in order; each command
+   buffer begins with go-gfx/vulkan v0.2.0's `Barrier`, and `Submit` queues the
+   second frame without waiting on the first's fence. The kernel declares
+   `RoundingModeRTE` (`kernel_rte_gen.spv`) where the device reports it, and
+   `robustBufferAccess` is enabled where offered.
 
 ## Sources opened
 

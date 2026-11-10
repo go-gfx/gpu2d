@@ -8,3 +8,4 @@ kernel.wgsl text eol=lf
 webgpu/shader.wgsl text eol=lf
 # kernel_gen.spv is compared byte for byte with what the generator writes.
 vulkan/kernel_gen.spv binary
+vulkan/kernel_rte_gen.spv binary

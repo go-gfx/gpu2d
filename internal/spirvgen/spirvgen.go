@@ -19,10 +19,11 @@ const Entry = "raster"
 
 // Kernel is the SPIR-V module for the compute entry point "raster", as the
 // little-endian bytes that vulkan/kernel_gen.spv holds. Float operations carry
-// NoContraction. RoundingModeRTE is not declared: whether a device offers it
-// (shaderRoundingModeRTEFloat32) is not something the binding reports yet, and
-// a module that declares it is refused where it is absent.
-func Kernel(kernel string) ([]byte, error) {
+// NoContraction. With rte the module also declares RoundingModeRTE for 32-bit
+// floats (vulkan/kernel_rte_gen.spv): a device may run it only where it reports
+// shaderRoundingModeRTEFloat32, which go-gfx/vulkan v0.2.0 exposes as
+// DeviceInfo.RoundingModeRTEFloat32.
+func Kernel(kernel string, rte bool) ([]byte, error) {
 	m, err := wgsl.Parse(kernel)
 	if err != nil {
 		return nil, err
@@ -31,7 +32,7 @@ func Kernel(kernel string) ([]byte, error) {
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("spirvgen: the kernel does not check: %v", errs)
 	}
-	words, err := spirv.Module(m, info, spirv.Options{}, Entry)
+	words, err := spirv.Module(m, info, spirv.Options{RoundingModeRTE: rte}, Entry)
 	if err != nil {
 		return nil, err
 	}

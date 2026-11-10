@@ -1,7 +1,7 @@
 github.com/ebitengine/purego v0.11.3 h1:OB+JLpdm7ioymhyA+6s5kbb/uOuYycAgL8NNTFc5MLg=
 github.com/ebitengine/purego v0.11.3/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
-github.com/go-gfx/vulkan v0.1.0 h1:kMEz7sJXvNbtriUTVh4p0IOx7+QdG+jkE27NFZU8UF8=
-github.com/go-gfx/vulkan v0.1.0/go.mod h1:IYZuEIwS3vtystKZRIp+DtuPWX3Nfq86yMC4gJ5ebhw=
+github.com/go-gfx/vulkan v0.2.0 h1:Mw6SxhdSspfhUL+KlqcoOue6hH3C1bi5NUsreyQ37Jc=
+github.com/go-gfx/vulkan v0.2.0/go.mod h1:IYZuEIwS3vtystKZRIp+DtuPWX3Nfq86yMC4gJ5ebhw=
 github.com/go-gfx/webgpu v0.15.0 h1:YqEOflkk9ej8KFYJvO4gMTpw9c9FtqmKLLP5joRDG2Y=
 github.com/go-gfx/webgpu v0.15.0/go.mod h1:doIaanN3TQ5QUSTUXDvSOrUYIdyAAfNmqCSDio2JTuo=
 github.com/go-gfx/wgsl v0.8.0 h1:zU4tEy9k2HQ2pQIgEuQqpPlpfPi5M7O8QbAzoSs6EZ0=

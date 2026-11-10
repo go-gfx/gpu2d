@@ -276,10 +276,14 @@ differing channels on both grounds there; lavapipe proves the bindings and the
 kernel, not the arithmetic or the speed of a GPU. The tests honour
 `VULKAN_REQUIRE=1`, `VULKAN_VALIDATION=1` and `VULKAN_VENDOR=0x1002`.
 
-Two frames cannot overlap on the device, since each composites over the
-previous one's pixels: `Submit` packs the second frame while the first runs,
-then waits for the first before it queues the second, because go-gfx/vulkan
-v0.1.0 records no barrier between submissions.
+Two frames are really in flight: `Submit` packs and queues the second frame
+while the first runs, and never waits on a fence. Each frame's command buffer
+begins with go-gfx/vulkan's `Barrier`, a memory dependency from the earlier
+writes in submission order, so the second frame composites over the first's
+pixels in order. The frames still run one after the other on the device, since
+each needs the other's pixels. On a device that reports
+`shaderRoundingModeRTEFloat32` the kernel declares `RoundingModeRTE`
+(`kernel_rte_gen.spv`); `robustBufferAccess` is enabled where offered.
 
 ## Bounds
 
