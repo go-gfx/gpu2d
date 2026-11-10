@@ -158,6 +158,18 @@ Vulkan with RTE and in HLSL with `precise`. Every conforming device then
 computes **the same f32 bits**, so a byte-identity measured on one GPU
 carries over to all of them. Cost: about ten flops per corner pixel only.
 
+**K1 measured it on Metal** (`metal/sqrt_test.go`, M4 Max): the builtin
+`length()` is already correctly rounded on every distance a corner pixel can
+have (all 4,194,304 offset pairs up to 2047.5) and on 16,777,216 random f32
+inputs, so a correction changes no byte there. The corrector written as
+proposed (f32 residual from Dekker's two-product) repairs a root one step off
+on all but about one input in 16 million, the ones within about 2^-25 ulp of a
+rounding midpoint, which an f32 residual cannot decide; an exact midpoint test
+needs more terms. It also moves a root by one step only, while Vulkan allows
+`sqrt` more than that. It is therefore not in `kernel.wgsl` yet: where it
+matters (lavapipe, RADV, WARP) it is to be finished and measured with W2.
+
+The first paragraph's plan, as written before K1:
 It enters in K1 behind a measurement: the parity suite runs on lavapipe,
 RADV, WARP and Metal with and without it. It is kept only if it changes no
 byte on Metal. Where RTE is not offered, the back-end does not claim
