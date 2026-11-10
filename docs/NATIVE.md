@@ -653,10 +653,27 @@ fractal benchmarks. Nothing below is a statement about a GPU.
   it builds and vets on windows, js/wasm and 386 (the binding returns
   `ErrUnsupported` there).
 
-**Software benchmarks (lavapipe in a linux/arm64 container on the M4 Max host;
-not GPU speed).** See the table below.
+**Software benchmarks.** These are lavapipe (llvmpipe, 16 threads) in a
+linux/arm64 container on the M4 Max host: **a CPU rasterizer's speed, not a
+GPU's**, and not comparable with the Metal figures in DESIGN.md. Three
+interleaved rounds (`WidgetFrame`, `Submit`, `WidgetFrame`, ...), 30
+iterations each, median reported. The 1-minute load of the host was 6.9 at the
+start and 10.8 at the end (other sessions plus the 16 lavapipe threads), so
+**the times are indicative only**; the allocation counts are exact.
 
-BENCH_PLACEHOLDER
+| Benchmark | Median | Rounds | Allocs/op |
+|---|---|---|---|
+| `WidgetFrame/1080p` (`Draw`) | 12.76 ms | 12.73, 12.76, 14.73 | 60 |
+| `WidgetFrame/4K` (`Draw`) | 43.5 ms | 40.7, 43.5, 46.9 | 61 |
+| `Submit/empty/64x64` | 21.6 µs | 21.6, 28.0, 21.3 | 50 |
+| `Submit/empty/1920x5668` | 64.4 µs | 63.3, 64.4, 75.6 | 50 |
+| `Submit/widget/1920x1080` | 93.8 µs | 93.8, 89.1, 130.6 | 51 |
+| `Submit/widget/1920x5668` | 334 µs | 328, 334, 351 | 52 |
+
+`Submit` alone costs about 20 µs of fixed work (the binding's calls) plus
+binning and copies that grow with the frame, and it returns before the device
+has drawn. The fractal numbers, the comparison with the CPU path on the 7950X
+and with cairo stay **pending**.
 
 ## Risks
 
