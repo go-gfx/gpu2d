@@ -200,7 +200,14 @@ func BenchmarkWidgetFrame(b *testing.B) {
 	}
 }
 
+// benchSoftware remembers a software adapter: the benchmarks after the first
+// skip without asking the browser for another one.
+var benchSoftware bool
+
 func benchDevice(b *testing.B) (*wg.Device, context.Context) {
+	if benchSoftware {
+		b.Skip("fallback adapter: no GPU to measure")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	b.Cleanup(cancel)
 	nav, err := wg.Navigator()
@@ -214,6 +221,7 @@ func benchDevice(b *testing.B) (*wg.Device, context.Context) {
 		b.Fatal(err)
 	}
 	if a.Info().Fallback {
+		benchSoftware = true
 		b.Skip("fallback adapter: no GPU to measure")
 	}
 	d, err := a.RequestDevice(ctx, &wg.DeviceDescriptor{Label: b.Name()})

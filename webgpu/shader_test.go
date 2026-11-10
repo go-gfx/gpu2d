@@ -64,6 +64,7 @@ func TestKernelShape(t *testing.T) {
 // for character: one arithmetic, two shaders.
 func TestKernelCoverageIsTheShaders(t *testing.T) {
 	cut := func(src string) string {
+		src = strings.ReplaceAll(src, "\r\n", "\n") // a Windows checkout converts line endings
 		i := strings.Index(src, "// cornerCenter:")
 		j := strings.Index(src, "fn coverage(")
 		if i < 0 || j < i {
