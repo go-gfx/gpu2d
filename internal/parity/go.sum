@@ -1,4 +1,4 @@
-github.com/go-gfx/gfx v0.37.0 h1:nQH23BtuJ1pqXqvg0s7FHSI1c/ewg9nnBl3Nc3cYCik=
-github.com/go-gfx/gfx v0.37.0/go.mod h1:4OenoKrgdht6UXYf5SV8w2tb41hfAdy4QoxJRPsRDz4=
-github.com/go-widgets/painter v0.16.1 h1:cKY736gXuZrS3keDHtf6EtDkA505cJrlxVawHNJsYbU=
-github.com/go-widgets/painter v0.16.1/go.mod h1:1ebqg88C/kD/+oLTQaIvQ2KHjR24FabpqIEjteGxOag=
+github.com/go-gfx/gfx v0.41.0 h1:MVEnory0Zx8ypzuVDrTIWz4Cekv8hn5ilcYg3glJPrk=
+github.com/go-gfx/gfx v0.41.0/go.mod h1:4OenoKrgdht6UXYf5SV8w2tb41hfAdy4QoxJRPsRDz4=
+github.com/go-widgets/painter v0.17.1 h1:inOmnCGSiHd4oZx7Zm7PJRDWWSEopnEnvDKEeFu9iT0=
+github.com/go-widgets/painter v0.17.1/go.mod h1:8kERcZUoWNyLIas1NsMWiYynvvyx+hcB2cNIh0Bx0yc=
