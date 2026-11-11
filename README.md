@@ -81,8 +81,8 @@ comparison can fail.
 A back-end draws the instances in order, one quad each, with the fragment
 shader computing `Coverage` at the pixel centre and fixed-function blending
 (`src-alpha`, `one-minus-src-alpha`). It must match `Rasterize` within **1 per
-channel**: the coverage is the same expression in float32, the blend is unorm
-arithmetic instead of `(src·a + dst·(255−a) + 127) / 255`.
+channel**: the coverage is exact (integer arithmetic, the compute kernel's),
+the blend is unorm arithmetic instead of `(src·a + dst·(255−a) + 127) / 255`.
 
 ## WebGPU (package `webgpu`, GOOS=js)
 
@@ -284,9 +284,11 @@ differing channels on both grounds there; lavapipe proves the bindings and the
 kernel, not the arithmetic or the speed of a GPU. The tests honour
 `VULKAN_REQUIRE=1`, `VULKAN_VALIDATION=1` and `VULKAN_VENDOR=0x1002`;
 `VULKAN_WIDE_SCENES=N` and `VULKAN_WIDE_CORNERS=N` run N random scenes up to 4K
-and N corner-heavy scenes with radii 1 to 64. The f32 kernel differs from the
-reference from radius 14 up (a few bytes in millions, on every f32 device,
-Metal included): see G2 in [docs/NATIVE.md](docs/NATIVE.md).
+and N corner-heavy scenes with radii 1 to 64 (60 of them are in the default
+suite). The corner coverage is decided in 32-bit integers from the exact
+squared distance, so the frame is byte-identical to `Rasterize` whatever the
+device's `sqrt`; radii past `gpu2d.MaxRadius` (16383) are refused. See G3 in
+[docs/NATIVE.md](docs/NATIVE.md).
 
 Two frames are really in flight: `Submit` packs and queues the second frame
 while the first runs, and never waits on a fence. Each frame's command buffer

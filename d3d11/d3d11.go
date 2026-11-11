@@ -6,7 +6,7 @@
 // kernel, through go-mswin/d3d11 (pure Go, COM through syscall, no cgo). It has
 // the shape of packages metal and vulkan: instances are binned into tiles on
 // the CPU; one GPU invocation per pixel walks its tile's instances in draw
-// order, computes gpu2d.Coverage in f32 and blends in integers as the CPU
+// order, computes gpu2d.Coverage exactly in integers and blends in integers as the CPU
 // reference does. The kernel is kernel.wgsl, emitted as HLSL by go-gfx/wgsl and
 // compiled to DXBC at generation time (kernel_gen.hlsl, kernel_gen.dxbc): the
 // arithmetic exists once, and nothing is compiled at run time.

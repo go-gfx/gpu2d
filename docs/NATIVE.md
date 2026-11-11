@@ -892,6 +892,79 @@ was wrong by a factor of seven; the dominant cost was in-place binning.
 (4) The `TestCornerHeavy` run with `VULKAN_WIDE_CORNERS` set fails today, by
 design: it is the finding, kept runnable.
 
+### Outcomes of G3 (2026-11-11): exact corner coverage, everywhere
+
+Decision (the user, 2026-11-11): do what is mathematically right, visually
+correct, with the best performance; correct existing code where it must be.
+G2 found the f32 coverage differing from the f64 reference from radius 14 up
+on every device, a correctly rounded `sqrt` included. The answer is not a better
+`sqrt`; it is to stop rounding.
+
+**One definition.** For a corner pixel, with D the exact squared distance from
+the pixel centre to the corner circle's centre, a fill covers
+`clamp(rad + 0.5 - sqrt(D), 0, 1)` and an outline ring `max(1 - |sqrt(D) -
+(rad - 0.5)|, 0)`. The offsets are half-integers, so `4·D` is an exact integer.
+
+- **CPU.** `gpu2d.Coverage` and go-widgets/painter's `cornerFillCoverage` and
+  outline ring take `math.Sqrt` (IEEE 754 correctly rounded) of that integer
+  instead of `math.Hypot`, which promises no rounding and is not the nearest
+  float on 100,813 of the 299,536 corner pixels of radii 1..96 (decided with
+  math/big, painter#44). PixelPainter: painter#44.
+- **Kernel** (`kernel.wgsl`, and `webgpu/shader.wgsl`, character for character).
+  The byte is `floor(alpha·cov + 0.5)`. With `S = sqrt(4D)`, the fill is
+  `floor((alpha·(2rad+1) + 1 - alpha·S) / 2)` and the outline's two sides are the
+  same shape with `T = 2·alpha + 1 ± alpha·(2rad-1)`. Each is the largest
+  integer `k` with `2k <= T -+ alpha·S`, found from `floor(sqrt(alpha²·4D))`: the
+  estimate comes from the f32 `sqrt` (any rounding, any error up to 16 steps)
+  and is corrected with exact 64-bit products (`mul64`, from 16-bit halves).
+  Nothing in the result depends on a rounded value, so it does not depend on the
+  device's `sqrt`, `RoundingMode`, or fused multiply-add. `Coverage`'s f64
+  evaluation of the same definition lands on the same byte: the true values are
+  at least 3e-8 from a rounding boundary, far from f64's error. Regenerated:
+  `kernel_gen.metal`, `kernel_gen.spv` and `kernel_rte_gen.spv`,
+  `kernel_gen.hlsl` and the DXBC (CI's Windows lane makes it).
+- **Radius bound.** `gpu2d.MaxRadius` = 16383: `4D < 8·rad²` stays under 2^31,
+  so 32-bit words suffice. A rounded rectangle past it (32,768 pixels a side) is
+  refused with `ErrTooLarge`, not drawn wrongly.
+
+**Proofs.**
+
+| Check | Result |
+|---|---|
+| The kernel algorithm mirrored in Go, 307,195,984 corner cases (every radius 1..64 with all 255 alphas, both kinds, then radii to 16383), each from three estimates off by 0, +3, -3 | equals `Coverage` on every case |
+| The old `math.Hypot` reference over the same domain | the same byte on every case: **0 pixels changed on the CPU** |
+| Corner-heavy, radii 1..64, 300 scenes, 111,219,500 channels, **Metal M4 Max** | **0** differ (it was 366) |
+| the same, **RADV W7700** (RTE on) | **0** differ (6,580 of 736,520,264 in 2,000 scenes before) |
+| the same, **lavapipe** | **0** differ (2,742 before) |
+| random scenes (now radii to 64 too), 300 scenes both grounds, Metal, RADV, lavapipe | **0** differ |
+| WARP and the browser compute mode | in CI (the D3D11 and WebGPU lanes run the same scenes); see the pull request |
+| break check: the fill's rounding term moved by one | caught by the corner scenes (`TestBreakCheckPerturbedCorner`) |
+
+The corner-heavy test is in the default suite of Metal and Vulkan
+(`TestCornerHeavy`, 60 scenes; `METAL_WIDE_CORNERS` and `VULKAN_WIDE_CORNERS` for
+more), and `internal/scenes.Random`, which every back-end and
+`internal/parity` use, now draws radii up to 64: a radius over 13 is not
+untested again. `TestKernelCoverageIsTheReference` runs the mirror over the
+whole domain in the default suite (19 s; `-short` skips the radii past 64).
+
+**Cost** (Draw alone, abbench, 8 interleaved rounds, one core):
+
+| Frame | before | after |
+|---|---|---|
+| W7700 widget 1080p | 0.458 ms | 0.453 ms (no change) |
+| W7700 widget 4K | 1.807 ms | 1.708 ms (no change) |
+| W7700 corner-heavy 1080p (1,280 rounded rects, radii 1..64) | 0.856 ms | 1.126 ms (+31.5 %) |
+| M4 Max | METAL-COST |
+
+Both stay far ahead of the CPU (`Rasterize` 27.1 and 110 ms for the widget
+frame); the corner-heavy frame is the worst case for the new arithmetic, and a
+frame of ordinary radii pays nothing measurable.
+
+**What this replaces.** G2's "Proposed fix" (double-single) is superseded by
+the integer form, which needs neither RTE nor the absence of fused multiply-add
+and whose proof is exhaustive; and the K1 corrector in "sqrt is the one
+operation no specification pins" is not needed.
+
 ### Outcomes of L1 (2026-11-10)
 
 L1 is done except what needs fractal: go-widgets/window #157 (open for review)
@@ -1286,7 +1359,14 @@ released and GDI draws again.
 
 ## Risks
 
-1. **Biggest: identity across vendors.** The specifications permit
+1. **RESOLVED in G3 (2026-11-11): identity across vendors.** The kernel no
+   longer computes a rounded distance at all: the corner coverage is decided in
+   32-bit integers (exact 4·D, exact squares), so neither the `sqrt`, the
+   rounding mode nor a fused multiply-add can move a byte, and the reference
+   (`math.Sqrt` of the same integer) is the same mathematical definition. 0
+   differing channels on Metal, RADV and lavapipe in the corner-heavy corpus
+   (see "Outcomes of G3"). The text that follows is the risk as it was
+   written, kept for the record. Biggest: identity across vendors. The specifications permit
    2–3 ULP (Vulkan) or 1 ULP (D3D11) on `sqrt`. Today's byte-identity is
    empirical on one GPU. The correctly rounded sqrt (decision 1) is the
    remedy, but it depends on RTE and on no contraction actually holding in

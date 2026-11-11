@@ -177,10 +177,20 @@ func scene(s surface, seed uint64, n, w, h int) {
 		case 0, 1, 2:
 			s.FillRect(coord(w), coord(h), size(), size(), col())
 		case 3, 4:
+			if r.IntN(3) == 0 { // a radius to 64: the corner coverage is exact, not f32
+				rad := 1 + r.IntN(64)
+				s.FillRoundRect(coord(w), coord(h), 2*rad+r.IntN(40), 2*rad+r.IntN(40), rad, col())
+				break
+			}
 			s.FillRoundRect(coord(w), coord(h), size(), size(), r.IntN(16)-2, col())
 		case 5:
 			s.StrokeRect(coord(w), coord(h), size(), size(), col(), r.IntN(6))
 		case 6, 7:
+			if r.IntN(3) == 0 {
+				rad := 1 + r.IntN(64)
+				s.StrokeRoundRect(coord(w), coord(h), 2*rad+r.IntN(40), 2*rad+r.IntN(40), rad, col(), r.IntN(6))
+				break
+			}
 			s.StrokeRoundRect(coord(w), coord(h), size(), size(), r.IntN(16)-2, col(), r.IntN(6))
 		case 8:
 			s.PushClip(coord(w), coord(h), size()+16, size()+16)
