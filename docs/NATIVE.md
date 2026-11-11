@@ -954,7 +954,14 @@ whole domain in the default suite (19 s; `-short` skips the radii past 64).
 | W7700 widget 1080p | 0.458 ms | 0.453 ms (no change) |
 | W7700 widget 4K | 1.807 ms | 1.708 ms (no change) |
 | W7700 corner-heavy 1080p (1,280 rounded rects, radii 1..64) | 0.856 ms | 1.126 ms (+31.5 %) |
-| M4 Max | METAL-COST |
+| M4 Max widget 1080p | 0.613 ms ± 23 % | 0.462 ms ± 12 % (no slowdown) |
+| M4 Max widget 4K | 1.709 ms | 1.561 ms (no slowdown) |
+| M4 Max corner-heavy 1080p | 1.430 ms ± 32 % | 1.381 ms ± 22 % (no difference) |
+
+The M4 Max rows were taken at a host load of about 8.3 to 9 (abbench waited for
+it to fall under 8 and discarded nothing above), so they are noisy (the spread
+is shown): read them as "no measurable cost", not as a speed-up. The W7700 rows
+were taken at a load under 1.5.
 
 Both stay far ahead of the CPU (`Rasterize` 27.1 and 110 ms for the widget
 frame); the corner-heavy frame is the worst case for the new arithmetic, and a
