@@ -262,9 +262,17 @@ It runs the same raster kernel through go-gfx/vulkan (pure Go, no cgo, 64-bit
 Linux): `vulkan/kernel_gen.spv` is generated from `kernel.wgsl`
 (`go generate ./vulkan`) by go-gfx/wgsl's `spirv` package, and
 `TestKernelSPIRVIsGenerated` fails on a stale file on every platform. The
-buffers are host-visible and coherent, so `List.Bin` bins straight into the
-slot's buffer, as on Metal. Elsewhere, and where no loader is installed, `New`
-returns an error satisfying `errors.Is(err, vulkan.ErrUnsupported)`.
+frame lives in device-local memory and `Pixels` is a host-visible copy of it:
+what you write there is uploaded before the next draw, and what the device has
+drawn is downloaded when you next call `Pixels` (or `Sync`), so a loop of
+`Draw` calls that never reads the frame moves no pixel across the bus. The
+instances, bins and arena stay host-visible; `List.Bin` bins in place into
+them only on a software device (lavapipe), because on a discrete GPU that
+memory is write-combined and binning reads it. On a Radeon PRO W7700 (RADV) the
+widget frame draws in 0.52 ms at 1080p and 1.98 ms at 4K, 52 and 55 times the
+CPU `Rasterize` ([docs/NATIVE.md](docs/NATIVE.md), G2, has the table and the
+cost of reading the frame back). Elsewhere, and where no loader is installed,
+`New` returns an error satisfying `errors.Is(err, vulkan.ErrUnsupported)`.
 
 A frame past a device limit (`maxStorageBufferRange`, guaranteed only at
 2^27 bytes, or `maxComputeWorkGroupCount`) is refused with `gpu2d.ErrTooLarge`
@@ -274,7 +282,11 @@ CI runs the package on lavapipe (Mesa's software Vulkan) with the Khronos
 validation layer, failing on any message. `TestMatchesReference` finds 0
 differing channels on both grounds there; lavapipe proves the bindings and the
 kernel, not the arithmetic or the speed of a GPU. The tests honour
-`VULKAN_REQUIRE=1`, `VULKAN_VALIDATION=1` and `VULKAN_VENDOR=0x1002`.
+`VULKAN_REQUIRE=1`, `VULKAN_VALIDATION=1` and `VULKAN_VENDOR=0x1002`;
+`VULKAN_WIDE_SCENES=N` and `VULKAN_WIDE_CORNERS=N` run N random scenes up to 4K
+and N corner-heavy scenes with radii 1 to 64. The f32 kernel differs from the
+reference from radius 14 up (a few bytes in millions, on every f32 device,
+Metal included): see G2 in [docs/NATIVE.md](docs/NATIVE.md).
 
 Two frames are really in flight: `Submit` packs and queues the second frame
 while the first runs, and never waits on a fence. Each frame's command buffer

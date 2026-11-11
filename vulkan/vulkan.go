@@ -10,10 +10,12 @@
 // reference does. The kernel is kernel.wgsl, compiled to SPIR-V by go-gfx/wgsl
 // at go generate time (kernel_gen.spv): the arithmetic exists once.
 //
-// The frame lives in host-visible, coherent memory: Pixels is the mapping, and
-// nothing is uploaded or downloaded explicitly. That is the right shape for
-// integrated GPUs and software rasterizers (lavapipe); on a discrete GPU the
-// target sits in PCIe-visible memory, which docs/NATIVE.md measures.
+// The frame lives in device-local memory and Pixels is a host-visible copy of
+// it: what the caller writes there is uploaded before the next draw, and what
+// the device has drawn is downloaded when Pixels is next called, so a loop of
+// Draw calls that never reads the frame moves no pixel across the bus. On a
+// device with one memory type (lavapipe, integrated GPUs) the copies are
+// memcpys. docs/NATIVE.md measures the alternatives on a discrete GPU.
 //
 // There is no presentation here: that is milestone L1. Where Vulkan is absent,
 // and on every platform go-gfx/vulkan does not support, New returns an error

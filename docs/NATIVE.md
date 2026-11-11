@@ -148,7 +148,10 @@ Under the rules above, Vulkan allows `sqrt` an error of about 2 to 3 ULP and
 D3D11 allows 1 ULP. Byte-identity with `Rasterize` (which uses f64 `Hypot`) is
 already **empirical** on Metal: the f32 result lands on the same byte because
 no tested pixel sits on a rounding boundary. Nothing promises that it holds on
-another GPU.
+another GPU. **G2 found that it does not hold on any f32 device once a corner
+radius reaches 14, sqrt rounded correctly or not** (see "Outcomes of G2"): the
+divergence is in the f32 coverage expression, not in the sqrt, so a correctly
+rounded sqrt alone does not remove it.
 
 Proposal: add a **correctly rounded `sqrt`** to `kernel.wgsl`. It takes the
 builtin's result and corrects it by one ULP, using an exact residual computed
@@ -660,11 +663,9 @@ fractal benchmarks. Nothing below is a statement about a GPU.
 - **`robustBufferAccess` is enabled where offered**, by go-gfx/vulkan v0.2.0's
   `Open` (`Renderer.RobustBufferAccess`); lavapipe offers it. It is the second
   line behind the kernel's in-range indices, as the bounds section promised.
-- **Device-local target: not decided.** The binding now has device-local
-  buffers and a staging `Copy`, but a lavapipe has one memory type that is both
-  host-visible and device-local, so it cannot show whether a device-local target
-  with a copy beats a mapped one, and no discrete GPU is reachable (fractal is
-  down). The target stays host-visible; to be measured on the W7700.
+- **Device-local target: decided in G2 (below), on the W7700.** The target is
+  device-local. This bullet's question was the wrong one: the time was in the
+  binning, not in the pixels.
 - **One descriptor set per `Pipeline`** in the binding, so each slot has its
   own pipeline and command buffer, and a slot rebinds a buffer only when it
   was replaced (growth, `Resize`).
@@ -698,8 +699,198 @@ start and 10.8 at the end (other sessions plus the 16 lavapipe threads), so
 
 `Submit` alone costs about 20 µs of fixed work (the binding's calls) plus
 binning and copies that grow with the frame, and it returns before the device
-has drawn. The fractal numbers, the comparison with the CPU path on the 7950X
-and with cairo stay **pending**.
+has drawn. The fractal numbers and the comparison with the CPU path on the
+7950X are in G2 below; cairo is **absent** on fractal (see there).
+
+### Outcomes of G2 (2026-11-10): the W7700, speed and wide parity
+
+fractal is back. Device: AMD Radeon PRO W7700, RADV (Mesa 25.2.8-0ubuntu0.24.04.2,
+Vulkan 1.4.318, discrete), Ryzen 9 7950X, `GOMAXPROCS=1`, every table below
+from abbench (8 interleaved rounds, 1-minute load under 2). Two tasks: the
+Vulkan path was no faster than the CPU, and its identity under RADV's 1-ULP
+`sqrt` was unmeasured.
+
+**Parity of v0.10.0 on RADV** (before any change here): `TestMatchesReference`
+max |Δ| 0, 0 of 3,686,400 channels on both grounds, with and without
+`RoundingModeRTE`, `robustBufferAccess` on. It still holds after the change
+below.
+
+#### Speed: located before it was fixed
+
+`BenchmarkFrameParts` times one widget frame in four parts (v0.10.0, 20
+iterations, one run):
+
+| Part | 1080p | 4K |
+|---|---|---|
+| pack (`Bin` + copies into the slot, no submission) | 18.65 ms | 74.5 ms |
+| submit (pack again, record, queue) | 20.98 ms | 82.7 ms |
+| wait (the device, to the fence) | 2.97 ms | 7.58 ms |
+| read (a copy of `Pixels` into a Go slice) | 36.8 ms | 145.9 ms |
+
+The expectation (G1, outcome 4) was that the pixel read-modify-write across
+PCIe dominates. It does not: the device finishes in 3 ms. **The 19 ms is the
+CPU, in `Bin`.** `pack` binned in place, straight into the slot's host-visible
+buffer, which saved a copy on Metal and lavapipe; on a discrete GPU that memory
+is write-combined, and `Bin` clears the spans and then increments them, so it
+*reads* them back across the bus. Measured on the W7700, the same widget frame
+(120 x 68 tiles, 536 instances, 16,320 span words, 26,900 list words):
+
+| `Bin` into | time |
+|---|---|
+| the slot's host-visible buffer (in place) | 21.6 ms |
+| ordinary Go slices | 47 µs |
+| then `putWords` into the host-visible buffer | 25 µs |
+
+(450 times, and the same hazard for any code that reads host-visible memory.
+The CPU `Bin` benchmark on the 7950X is 54 µs.) The host-visible *target*
+did cost something, as G1 suspected, but about a seventh as much: 2.97 ms of
+device time against about 0.4 ms once it is device-local.
+
+**Changes.** (1) `Bin` into the renderer's own slices and copy the result into
+the slot; in place is kept for `DeviceTypeCPU` (lavapipe), where host memory is
+cached, and `TestPackBinsIntoTheSlotBuffers` skips elsewhere. (2) `place` copied
+into a fresh, doubled buffer every frame once binning was not in place; it now
+reuses a buffer that is large enough. (3) The target is device-local
+(`NewDeviceBuffer`); `Pixels` is a host-visible stage. It is uploaded before
+the next dispatch if the caller may have written it (`Pixels` was called with
+nothing in flight), and downloaded when `Pixels` or `Sync` is called with the
+device ahead; a loop of `Draw` that never reads the frame moves no pixel across
+the bus. Two frames in flight (the barrier) and the Submit/Wait pair are
+unchanged.
+
+**Inputs stay host-visible; decided by measurement.** Dispatch alone (a slot
+packed once, `Submit` plus fence, 50 runs), instances, bins and arena
+host-visible against device-local copies of the same bytes:
+
+| Frame | host-visible inputs | device-local inputs | gain |
+|---|---|---|---|
+| 1080p | 205.7 µs | 166.1 µs | 40 µs |
+| 4K | 613.6 µs | 375.5 µs | 238 µs |
+
+Uploading them per frame costs three copies, a barrier and three more buffers
+per slot; the instances are 34 KB and the bins about 170 KB at 1080p, so the
+copies would eat most of a 40 µs gain, and a 4K gain of at most 0.24 ms is 12 %
+of that frame. Not adopted. Revisit if the frame's instance count grows by an
+order of magnitude.
+
+**Results** (`WidgetFrame`: `Draw` alone; `WidgetFrameRead`: `Draw` and a copy of
+`Pixels` into a Go slice, which is what a consumer of the result pays; CPU =
+`BenchmarkRasterize`, which leaves its result in host memory):
+
+| Frame | v0.10.0 `Draw` | now `Draw` | CPU `Rasterize` | now / CPU |
+|---|---|---|---|---|
+| 1080p | 19.40 ms | 0.524 ms | 27.13 ms | **52 times faster** |
+| 4K | 76.29 ms | 1.984 ms | 110.0 ms | **55 times faster** |
+
+| Frame, result read into a Go slice | v0.10.0 | now (`NewBuffer` stage) | with `NewReadbackBuffer` | CPU |
+|---|---|---|---|---|
+| 1080p | 55.47 ms | 40.88 ms | 4.76 ms | 27.15 ms |
+| 4K | 219.5 ms | 159.9 ms | 15.34 ms | 110.2 ms |
+
+(v0.10.0 `Draw` was 21.99 ms and 88.34 ms in an earlier session; the load
+differed. All rows here are from one session.) **The first table is the
+presented-window case, where the result stays on the device. The second shows
+a defect that remains when the CPU reads the result:** `NewBuffer` takes the
+first host-visible, coherent memory type, which on RADV is write-combined, so
+the CPU reads the stage at about 220 MB/s (36 ms for 8 MB). A host-cached
+type fixes it (the third column, prototyped with a local `replace`:
+**5.7 times faster than the CPU at 1080p, 7.2 times at 4K**), but needs a
+binding change: go-gfx/vulkan#7 adds `Device.NewReadbackBuffer`. Until it is
+released and gpu2d moves to it (one line, `newTarget`), a *read* of the
+frame is **1.5 times slower than the CPU** (40.9 against 27.2 ms at 1080p),
+an open defect that this change does not close. Allocations per `Draw` are
+75 and 76 (74 before).
+
+**cairo's image back-end: absent on fractal** (`pkg-config cairo`: package not
+found; nothing was installed), so the cairo column of the G1 plan is still
+open. Metal on the M4 Max draws the same frame in about 1 ms, the W7700 in
+0.52 ms.
+
+#### Identity under RADV's 1-ULP sqrt
+
+`TestMatchesReferenceWide` (`VULKAN_WIDE_SCENES=N`: N random scenes, each of
+a random size log-uniform from 16 x 16 to 3840 x 2160, opaque and translucent
+grounds alternating, density following the area) and `TestCornerHeavy`
+(`VULKAN_WIDE_CORNERS=N`: rounded rectangles and outlines, radii 1 to 64,
+every position, opaque and translucent, 160 per scene on 96 to 515 pixel
+frames). Both name the kind and radius of the topmost instance over each
+differing pixel.
+
+| Run on the W7700 (RADV, RTE on) | scenes | channels | differ | max abs diff |
+|---|---|---|---|---|
+| random scenes, sizes to 4K (146,144 instances, 596 s) | 5,000 | 6,384,044,744 | **0** | 0 |
+| corner-heavy, radii 1..64 (520,428 instances, 88 s) | 2,000 | 736,520,264 | **6,580** | 1 |
+| corner-heavy, radii 1..13 (default, CI) | 60 | 20,334,088 | 0 | 0 |
+
+lavapipe (llvmpipe, LLVM 20.1.2, Mesa 25.2.8) over the same corner scenes
+differs too (2,742 of 736,520,264 channels in 2,000 scenes, max 1; its 300
+random scenes up to 4K: 0 of 354,551,228), and so does **Metal on the M4 Max**, with the same
+generator: 0 of 111,219,500 channels at radii 1..13 and **366** at radii
+1..64. So this is not RADV's `sqrt`.
+
+Where, on RADV: every differing pixel is under a fill (kind 0) or an outline
+(kind 1), never a mask, alpha box or image, and every difference is exactly 1.
+The attribution is the *topmost* instance over the pixel, so a few dozen
+pixels are credited to radii 9 to 13: those are a larger corner beneath a
+translucent smaller one (the exhaustive mirror below finds no difference under
+radius 14, and 60 scenes at radii 1..13 gave 0 on RADV, lavapipe and, in 300
+scenes, Metal). The densest radii are 41 (354 fill and 345 outline
+pixels), 42 (250), 43 (197), 44 (185), 63 (169) and 64 (143), the ranges the
+mirror below predicts. No byte differs on the random scenes, whose radii stop
+at 13.
+
+**Finding: the f32 coverage is not the f64 reference at radius 14 or more, on
+every f32 device, with a correctly rounded `sqrt`.** Every random scene in
+`TestMatchesReference` has radius at most 13 (`r.IntN(16)-2`), which is why
+parity was exact so far. `TestF32CornerCoverageDivergence` (root package, no
+GPU) enumerates the domain, which is small because a corner pixel's coverage
+depends only on (kind, radius, offset in the corner box, alpha): every radius
+1..64 with all 255 alphas, then radii to 1024 at six alphas, 665,354,460
+cases, with the kernel mirrored in `float32` operation by operation:
+
+| Evaluation | bytes differing from the reference |
+|---|---|
+| kernel in f32, correctly rounded sqrt | 4,700 (none at radius 13 or less; first at radius 14) |
+| the same, sqrt 1 ULP off on one input in five (RADV's measured rate) | 7,520 |
+| double-single corrector (below), either sqrt | **0** |
+
+The mechanism: `cov = rad + 0.5 - d` carries an f32 error of up to half a ULP
+of `d` (about 2e-6 at `d` near 50, which grows with the radius), which the
+alpha multiplies by up to 255; the byte is `floor(alpha * cov + 0.5)`, so a
+rare antialiased corner pixel (4,700 of the 665 million cases) lands on the
+other side of a boundary, more often the larger the radius. It is
+unrelated to the `sqrt`'s rounding: lavapipe and Metal compute `length`
+correctly and differ as well, and the RADV counts are of the same size.
+
+**Proposed fix, not wired in (the evidence says it needs a decision, see
+below).** Evaluate the coverage in double-single (an f32 pair) from an exact
+integer squared distance `D = 4(dx² + dy²)` (exact in f32 up to radius 1448;
+past it a two-product): `s0 = sqrt(D)` however rounded, residual `D - s0²`
+exactly by Dekker's two-product (no FMA, which RTE and `NoContraction`
+already require), one Newton step `c = residual / (2 s0)`, `d = (s0 + c) / 2`,
+then the coverage and `floor(alpha * cov + 0.5)` on the pair. The Go mirror in
+`coverage_f32_test.go` has **0 differences in all 665,354,460 cases, with an
+exact and with a perturbed `sqrt`**, so it also makes the result independent of
+the `sqrt` risk 1 worried about. It costs a few dozen flops per corner pixel
+(not measured on a device yet), none elsewhere. This replaces the K1 corrector in
+"sqrt is the one operation no specification pins", which fixes the wrong
+operation: a correctly rounded `sqrt` leaves 4,700 bytes of this domain
+different. It must be validated per device (RADV, lavapipe, Metal, WARP) as
+the K1 corrector was.
+
+**What this contradicts or leaves open in this document.** (1) Risk 1 and
+decision 3 say a GPU that disagrees with `Rasterize` falls back to the CPU and
+is named. Read literally, **every GPU back-end (Metal, WebGPU, Vulkan, D3D11)
+disagrees** for a frame with a rounded rectangle of radius 14 or more, which
+real interfaces have. The user's decision is needed: land the corrector in
+`kernel.wgsl` and the four emitters (identity restored, measured per device),
+or relax the contract to |Δ| at most 1 per channel above radius 13 (DESIGN.md
+already states a tolerance for devices without RTE). (2) "Byte-identity is
+empirical on Metal" (above) was true of a test set whose radii stopped at 13.
+(3) The G1 expectation that the pixel read-modify-write across PCIe dominates
+was wrong by a factor of seven; the dominant cost was in-place binning.
+(4) The `TestCornerHeavy` run with `VULKAN_WIDE_CORNERS` set fails today, by
+design: it is the finding, kept runnable.
 
 ### Outcomes of L1 (2026-11-10)
 
