@@ -801,6 +801,28 @@ frame is **1.5 times slower than the CPU** (40.9 against 27.2 ms at 1080p),
 an open defect that this change does not close. Allocations per `Draw` are
 75 and 76 (74 before).
 
+**Follow-up: the read-back swap (go-gfx/vulkan v0.3.0).** `newTarget` now
+allocates the stage with `NewReadbackBuffer`, and the defect above is closed.
+Same session conditions (load 1.4 at the start), 8 interleaved rounds, base the
+`NewBuffer` stage:
+
+| Frame | `Draw` | `Draw` + `Sync` (frame on the host) | `Draw` + read into a Go slice, before | after | CPU |
+|---|---|---|---|---|---|
+| 1080p | 0.450 ms | 2.12 ms | 41.38 ms | 4.57 ms (5.9 times faster than the CPU) | 27.1 ms |
+| 4K | 1.975 ms | 7.13 ms | 163.1 ms | 16.40 ms (6.7 times faster) | 110.0 ms |
+
+`Draw` + `Sync` is 12.8 and 15.4 times faster than `Rasterize`. Review findings
+fixed with it: a failed download in `Sync` no longer lets `Pixels` mark the
+stage for upload (the stale stage would have overwritten the device's newer
+frame), and the error is returned by every `Submit` until a `Sync` succeeds; a
+fence that times out is never destroyed (vkDestroyFence, VUID-01120), nor are
+the buffers and device that its work uses: the renderer is lost, later calls
+return `ErrTimeout`, `Close` destroys nothing. The lavapipe lane now runs the
+layer's synchronization validation (`VK_LAYER_VALIDATE_SYNC=1`); the layer
+(1.4.309) tracks hazards between copies, not between a copy and a dispatch, so
+`TestBreakCheckTransferBarrier` proves that on the upload and download copies,
+which share `Barrier` with the dispatch ordering.
+
 **cairo's image back-end: absent on fractal** (`pkg-config cairo`: package not
 found; nothing was installed), so the cairo column of the G1 plan is still
 open. Metal on the M4 Max draws the same frame in about 1 ms, the W7700 in

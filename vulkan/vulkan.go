@@ -81,7 +81,7 @@ var ErrTimeout = errors.New("gpu2d/vulkan: the device did not finish the frame")
 
 // waitLimit bounds a wait on the device, so that a hung GPU is an error and
 // not a hung program.
-const waitLimit = time.Minute
+var waitLimit = time.Minute // a variable for the test of the timeout
 
 // slots is how many frames may be in flight: the GPU draws one while the CPU
 // bins and packs the next.
@@ -144,6 +144,7 @@ type Renderer struct {
 	n      int  // frames in flight
 	closed bool
 
+	lost     bool  // a frame timed out and may still run: nothing is destroyed (release)
 	up       bool  // stage may differ from target: upload it before the next dispatch
 	devNewer bool  // target is ahead of stage: Pixels downloads it first
 	err      error // a download Pixels could not report, for the next call that can
@@ -244,7 +245,10 @@ func (r *Renderer) newTarget(w, h int) error {
 	if err != nil {
 		return tooLarge(err)
 	}
-	st, err := r.dev.NewBuffer(n, vk.UsageTransferSrc|vk.UsageTransferDst)
+	// The stage is what the CPU reads back: host-cached memory where there is
+	// any. NewBuffer's first host-visible type is write-combined on a discrete
+	// GPU, which the CPU reads at about 220 MB/s (go-gfx/vulkan#7).
+	st, err := r.dev.NewReadbackBuffer(n, vk.UsageTransferSrc|vk.UsageTransferDst)
 	if err != nil {
 		t.Close()
 		return tooLarge(err)
@@ -305,14 +309,16 @@ func (r *Renderer) RobustBufferAccess() bool { return r.dev.RobustBufferAccess()
 // nothing when neither happened (a loop of Draw calls never calls it), and the
 // slice stays valid until Resize or Close. While frames are in flight it
 // returns the copy as it is and the device owns the frame: it is not current
-// until the last Wait. A download that fails is reported by the next call that
-// can (Sync, Submit, Draw).
+// until the last Wait. A download that fails leaves the stage stale: it is then
+// never uploaded (the device's frame is the newer one), every Submit and Draw
+// returns the error until a Sync succeeds, and Pixels returns the stale copy.
 func (r *Renderer) Pixels() []byte {
 	if r.n == 0 && !r.closed {
-		if err := r.Sync(); err != nil && r.err == nil {
+		if err := r.Sync(); err != nil {
 			r.err = err
+		} else {
+			r.up = true
 		}
-		r.up = true
 	}
 	return r.stage.Bytes()
 }
@@ -330,8 +336,15 @@ func (r *Renderer) Sync() error {
 			first = err
 		}
 	}
-	if first != nil || !r.devNewer {
+	if first != nil {
 		return first
+	}
+	if r.lost {
+		return ErrTimeout
+	}
+	if !r.devNewer {
+		r.err = nil
+		return nil
 	}
 	if err := r.xfer.Begin(); err != nil {
 		return err
@@ -351,11 +364,13 @@ func (r *Renderer) Sync() error {
 	if err != nil {
 		return err
 	}
-	defer fe.Close()
 	if err := r.finish(&slot{fence: fe}); err != nil {
+		r.release(fe, err)
 		return err
 	}
+	fe.Close()
 	r.devNewer = false
+	r.err = nil
 	return nil
 }
 
@@ -420,9 +435,11 @@ func (r *Renderer) Submit(l *gpu2d.List) error {
 	if r.closed {
 		return vk.ErrClosed
 	}
+	if r.lost {
+		return ErrTimeout
+	}
 	if err := r.err; err != nil {
-		r.err = nil
-		return err
+		return err // sticky: the stage is stale until a Sync succeeds
 	}
 	s, _, err := r.pack(l)
 	if err != nil {
@@ -463,6 +480,24 @@ func (r *Renderer) Submit(l *gpu2d.List) error {
 	return nil
 }
 
+// release disposes of a fence after finish returned err. A fence that timed out
+// may still be pending, and the specification forbids destroying it
+// (vkDestroyFence, VUID-vkDestroyFence-fence-01120: "All queue submission
+// commands that refer to fence must have completed execution"), as it forbids
+// destroying the buffers and the device that pending work uses
+// (VUID-vkDestroyBuffer-buffer-00922, VUID-vkDestroyDevice-device-00378). The
+// binding has no vkDeviceWaitIdle to make them safe, so the renderer is lost:
+// the fence is leaked on purpose, every later call returns ErrTimeout, and Close
+// destroys nothing. Any other error (VK_ERROR_DEVICE_LOST included) means the
+// work is over, and the fence is destroyed.
+func (r *Renderer) release(fe *vk.Fence, err error) {
+	if errors.Is(err, ErrTimeout) {
+		r.lost = true
+		return
+	}
+	fe.Close()
+}
+
 // finish blocks until s's frame has run. It leaves the fence in place.
 func (r *Renderer) finish(s *slot) error {
 	ok, err := s.fence.Wait(waitLimit)
@@ -486,6 +521,9 @@ func (r *Renderer) Resize(w, h int) error {
 	}
 	for r.n > 0 {
 		_ = r.Wait()
+	}
+	if r.lost {
+		return ErrTimeout
 	}
 	if w == r.w && h == r.h {
 		return nil
@@ -569,8 +607,11 @@ func (r *Renderer) Wait() error {
 		return ErrNothingInFlight
 	}
 	s := &r.slot[r.head]
-	err := r.finish(s)
-	s.fence.Close()
+	err := ErrTimeout
+	if !r.lost {
+		err = r.finish(s)
+	}
+	r.release(s.fence, err)
 	s.fence = nil
 	r.head = (r.head + 1) % slots
 	r.n--
@@ -650,6 +691,10 @@ func (r *Renderer) Close() {
 		_ = r.Wait()
 	}
 	r.closed = true
+	if r.lost {
+		// A frame may still be running: destroy nothing (see release).
+		return
+	}
 	for i := range r.slot {
 		s := &r.slot[i]
 		for _, b := range []*vk.Buffer{s.inst, s.bins, s.data, s.uni} {

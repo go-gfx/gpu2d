@@ -64,6 +64,30 @@ func BenchmarkFrameParts(b *testing.B) {
 	}
 }
 
+// BenchmarkWidgetFrameSync is Draw and Sync: the frame is on the host (the
+// download), and not read.
+func BenchmarkWidgetFrameSync(b *testing.B) {
+	for _, s := range []struct {
+		name string
+		w, h int
+	}{{"1080p", 1920, 1080}, {"4K", 3840, 2160}} {
+		b.Run(s.name, func(b *testing.B) {
+			r := renderer(b, s.w, s.h)
+			l, _ := gpu2d.NewList(s.w, s.h)
+			gpu2d.WidgetFrame(l)
+			b.ReportAllocs()
+			for b.Loop() {
+				if err := r.Draw(l); err != nil {
+					b.Fatal(err)
+				}
+				if err := r.Sync(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkWidgetFrameRead is BenchmarkWidgetFrame plus the read of the result
 // into a Go slice: Draw, then Pixels copied out. It is the figure to set beside
 // gpu2d.Rasterize, which leaves its result in host memory.
