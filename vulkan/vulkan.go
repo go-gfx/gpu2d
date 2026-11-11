@@ -312,6 +312,11 @@ func (r *Renderer) RobustBufferAccess() bool { return r.dev.RobustBufferAccess()
 // until the last Wait. A download that fails leaves the stage stale: it is then
 // never uploaded (the device's frame is the newer one), every Submit and Draw
 // returns the error until a Sync succeeds, and Pixels returns the stale copy.
+//
+// After a fence timeout the renderer is lost (Sync returns ErrTimeout) and the
+// abandoned download may still be writing the stage: Pixels then returns bytes
+// that can be torn, a mix of two frames. Treat them as undefined and only
+// Close the renderer.
 func (r *Renderer) Pixels() []byte {
 	if r.n == 0 && !r.closed {
 		if err := r.Sync(); err != nil {
@@ -351,10 +356,17 @@ func (r *Renderer) Sync() error {
 	}
 	// Order the copy after the last dispatch (finished, but cheap) and make the
 	// bytes visible to the host.
+	// A failure after Begin must not leave the buffer recording: Begin on a
+	// recording buffer is ErrInvalid, so every later Sync (and, the error being
+	// sticky, every Submit) would fail for good. go-gfx/vulkan v0.3.0 has no
+	// reset; End leaves the recording state even when it fails, and the next
+	// Begin resets the buffer.
 	if err := r.xfer.Barrier(); err != nil {
+		_ = r.xfer.End()
 		return err
 	}
 	if err := r.xfer.Copy(r.stage, r.target, r.target.Size()); err != nil {
+		_ = r.xfer.End()
 		return err
 	}
 	if err := r.xfer.End(); err != nil {

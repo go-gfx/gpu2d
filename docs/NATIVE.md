@@ -817,7 +817,12 @@ stage for upload (the stale stage would have overwritten the device's newer
 frame), and the error is returned by every `Submit` until a `Sync` succeeds; a
 fence that times out is never destroyed (vkDestroyFence, VUID-01120), nor are
 the buffers and device that its work uses: the renderer is lost, later calls
-return `ErrTimeout`, `Close` destroys nothing. The lavapipe lane now runs the
+return `ErrTimeout`, `Close` destroys nothing. Known limit: after such a
+timeout in the download of `Sync`, the copy that was abandoned may still be
+writing the stage, so `Pixels` can return torn bytes; they are undefined on a
+lost renderer. A failure while recording the download no longer leaves its
+command buffer recording (every later `Sync` would have failed with
+`ErrInvalid`): the buffer is ended, and the next `Begin` resets it. The lavapipe lane now runs the
 layer's synchronization validation (`VK_LAYER_VALIDATE_SYNC=1`); the layer
 (1.4.309) tracks hazards between copies, not between a copy and a dispatch, so
 `TestBreakCheckTransferBarrier` proves that on the upload and download copies,
