@@ -81,6 +81,14 @@ var ErrImageScale = errors.New("gpu2d: image size times its destination size pas
 // recorded, and a surface larger than it is refused by NewList.
 const MaxCoord = 1 << 24
 
+// MaxRadius bounds a corner radius, after it is clamped to half the smaller
+// side: 4·D, four times the squared distance from a corner pixel to the
+// circle's centre, is below 8·radius², which stays under 2^31 here, so every
+// kernel decides the corner coverage in 32-bit integers. A rounded rectangle
+// past it (one at least 32,768 pixels on a side) is not recorded and the
+// list's Err reports ErrTooLarge.
+const MaxRadius = 16383
+
 func pack(c RGBA) uint32 {
 	return uint32(c.R) | uint32(c.G)<<8 | uint32(c.B)<<16 | uint32(c.A)<<24
 }
@@ -341,6 +349,10 @@ func intersect(a, b Rect) Rect {
 // empty rectangle, a transparent colour, or nothing left after the clip.
 func (l *List) add(r Rect, radius int, c RGBA, k Kind) {
 	if r.W <= 0 || r.H <= 0 || c.A == 0 {
+		return
+	}
+	if radius > MaxRadius {
+		l.refuse(ErrTooLarge)
 		return
 	}
 	dx, dy := l.offset()

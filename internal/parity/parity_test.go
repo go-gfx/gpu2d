@@ -72,6 +72,40 @@ func (s ref) PopTranslate()            { s.p.PopTranslate() }
 type sub struct {
 	l  *gpu2d.List
 	rz *vector.Rasterizer
+	// off is the translation stack. gpu2d.List keeps its own for rectangles,
+	// masks and images, but DrawAlpha takes coverage in surface pixels, so a
+	// path must be shifted before it is rasterized. PixelPainter moves paths
+	// with PushTranslate since go-widgets/painter v0.16.2, as gpupainter's
+	// shift does for the real adapter.
+	off *[][2]int
+}
+
+// shift moves pth by the current translation.
+func (s sub) shift(pth *vector.Path) *vector.Path {
+	if len(*s.off) == 0 {
+		return pth
+	}
+	t := (*s.off)[len(*s.off)-1]
+	if t == [2]int{} {
+		return pth
+	}
+	dx, dy := float64(t[0]), float64(t[1])
+	q := vector.NewPath()
+	pth.Each(func(op vector.PathOp, pts ...[2]float64) {
+		switch op {
+		case vector.OpMove:
+			q.MoveTo(pts[0][0]+dx, pts[0][1]+dy)
+		case vector.OpLine:
+			q.LineTo(pts[0][0]+dx, pts[0][1]+dy)
+		case vector.OpQuad:
+			q.QuadTo(pts[0][0]+dx, pts[0][1]+dy, pts[1][0]+dx, pts[1][1]+dy)
+		case vector.OpCubic:
+			q.CubicTo(pts[0][0]+dx, pts[0][1]+dy, pts[1][0]+dx, pts[1][1]+dy, pts[2][0]+dx, pts[2][1]+dy)
+		case vector.OpClose:
+			q.Close()
+		}
+	})
+	return q
 }
 
 func (s sub) DrawMask(x, y, w, h int, mask []byte, stride int, c [4]uint8) {
@@ -82,13 +116,13 @@ func (s sub) DrawImage(x, y, w, h int, src []byte, sw, sh int) {
 }
 func (s sub) FillPath(pth *vector.Path, c [4]uint8, rule vector.FillRule) {
 	w, h := s.l.Size()
-	if cov, ox, oy, bw, bh, ok := s.rz.Fill(pth, rule, w, h); ok && c[3] != 0 {
+	if cov, ox, oy, bw, bh, ok := s.rz.Fill(s.shift(pth), rule, w, h); ok && c[3] != 0 {
 		s.l.DrawAlpha(cov, ox, oy, bw, bh, gc(c))
 	}
 }
 func (s sub) StrokePath(pth *vector.Path, c [4]uint8, width float64) {
 	w, h := s.l.Size()
-	if cov, ox, oy, bw, bh, ok := s.rz.Stroke(pth, width, w, h); ok && c[3] != 0 {
+	if cov, ox, oy, bw, bh, ok := s.rz.Stroke(s.shift(pth), width, w, h); ok && c[3] != 0 {
 		s.l.DrawAlpha(cov, ox, oy, bw, bh, gc(c))
 	}
 }
@@ -106,10 +140,22 @@ func (s sub) StrokeRect(x, y, w, h int, c [4]uint8, lw int) {
 func (s sub) StrokeRoundRect(x, y, w, h, rad int, c [4]uint8, lw int) {
 	s.l.StrokeRoundRect(gpu2d.Rect{X: x, Y: y, W: w, H: h}, rad, gc(c), lw)
 }
-func (s sub) PushClip(x, y, w, h int)  { s.l.PushClip(gpu2d.Rect{X: x, Y: y, W: w, H: h}) }
-func (s sub) PopClip()                 { s.l.PopClip() }
-func (s sub) PushTranslate(dx, dy int) { s.l.PushTranslate(dx, dy) }
-func (s sub) PopTranslate()            { s.l.PopTranslate() }
+func (s sub) PushClip(x, y, w, h int) { s.l.PushClip(gpu2d.Rect{X: x, Y: y, W: w, H: h}) }
+func (s sub) PopClip()                { s.l.PopClip() }
+func (s sub) PushTranslate(dx, dy int) {
+	s.l.PushTranslate(dx, dy)
+	var t [2]int
+	if n := len(*s.off); n > 0 {
+		t = (*s.off)[n-1]
+	}
+	*s.off = append(*s.off, [2]int{t[0] + dx, t[1] + dy})
+}
+func (s sub) PopTranslate() {
+	s.l.PopTranslate()
+	if n := len(*s.off); n > 0 {
+		*s.off = (*s.off)[:n-1]
+	}
+}
 
 // scene draws n random operations, the same ones for any surface given the
 // same seed: translucent and opaque colours, rectangles past every edge, tiny
@@ -177,10 +223,20 @@ func scene(s surface, seed uint64, n, w, h int) {
 		case 0, 1, 2:
 			s.FillRect(coord(w), coord(h), size(), size(), col())
 		case 3, 4:
+			if r.IntN(3) == 0 { // a radius to 64: the corner coverage is exact, not f32
+				rad := 1 + r.IntN(64)
+				s.FillRoundRect(coord(w), coord(h), 2*rad+r.IntN(40), 2*rad+r.IntN(40), rad, col())
+				break
+			}
 			s.FillRoundRect(coord(w), coord(h), size(), size(), r.IntN(16)-2, col())
 		case 5:
 			s.StrokeRect(coord(w), coord(h), size(), size(), col(), r.IntN(6))
 		case 6, 7:
+			if r.IntN(3) == 0 {
+				rad := 1 + r.IntN(64)
+				s.StrokeRoundRect(coord(w), coord(h), 2*rad+r.IntN(40), 2*rad+r.IntN(40), rad, col(), r.IntN(6))
+				break
+			}
 			s.StrokeRoundRect(coord(w), coord(h), size(), size(), r.IntN(16)-2, col(), r.IntN(6))
 		case 8:
 			s.PushClip(coord(w), coord(h), size()+16, size()+16)
@@ -216,7 +272,7 @@ func render(t *testing.T, seed uint64, n, w, h int) (want, got []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scene(sub{l, &vector.Rasterizer{}}, seed, n, w, h)
+	scene(sub{l, &vector.Rasterizer{}, &[][2]int{}}, seed, n, w, h)
 	if err := l.Err(); err != nil {
 		t.Fatal(err)
 	}
