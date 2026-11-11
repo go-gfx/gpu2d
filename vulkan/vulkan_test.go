@@ -259,7 +259,12 @@ func TestDeviceLimits(t *testing.T) {
 		if err := r.Resize(side, side); !errors.Is(err, gpu2d.ErrTooLarge) {
 			t.Fatalf("Resize(%d, %d) past maxStorageBufferRange: %v", side, side, err)
 		}
-		if _, err := New(side, side); !errors.Is(err, gpu2d.ErrTooLarge) {
+		// The same device as r (VULKAN_VENDOR), not New's best one.
+		o := Options{Filter: vk.Filter{VendorID: r.Info().VendorID}}
+		if nr, err := NewWith(side, side, o); !errors.Is(err, gpu2d.ErrTooLarge) {
+			if nr != nil {
+				nr.Close()
+			}
 			t.Fatalf("New(%d, %d) past maxStorageBufferRange: %v", side, side, err)
 		}
 	}
