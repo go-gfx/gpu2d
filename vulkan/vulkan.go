@@ -6,7 +6,7 @@
 // through go-gfx/vulkan (pure Go, no cgo). It has the shape of package metal:
 // instances are binned into tiles on the CPU, straight into a host-visible
 // buffer; one GPU invocation per pixel walks its tile's instances in draw
-// order, computes gpu2d.Coverage in f32, and blends in integers as the CPU
+// order, computes gpu2d.Coverage exactly in integers, and blends in integers as the CPU
 // reference does. The kernel is kernel.wgsl, compiled to SPIR-V by go-gfx/wgsl
 // at go generate time (kernel_gen.spv): the arithmetic exists once.
 //
@@ -46,8 +46,9 @@ import (
 var KernelSPV []byte
 
 // KernelRTESPV is KernelSPV with the RoundingModeRTE execution mode declared
-// for 32-bit floats, so that + - * are correctly rounded and the f32 coverage
-// is the same on every device that has it. The renderer runs it on a device
+// for 32-bit floats, so that + - * are correctly rounded (the kernel's only
+// float is the estimate of a root that integer arithmetic then corrects, so
+// the result does not depend on it). The renderer runs it on a device
 // that reports shaderRoundingModeRTEFloat32 (a module may declare the mode only
 // there: VUID-RuntimeSpirv-shaderRoundingModeRTEFloat32-06303), and KernelSPV
 // elsewhere; both keep NoContraction.

@@ -50,8 +50,8 @@ the reference's.
   primitive it implements. The go-widgets adapter carries that test, since
   go-gfx must not depend on go-widgets.
 - A GPU back-end must equal `Rasterize` within **1 per channel** (|Δ| ≤ 1). The
-  coverage is the same formula in f32 instead of f64; the blend is unorm
-  arithmetic instead of `(src·a + dst·(255−a) + 127) / 255`. The tests report
+  coverage is exact (decided in integers, as the compute kernel does, since
+  G3 of docs/NATIVE.md); the blend is unorm arithmetic instead of `(src·a + dst·(255−a) + 127) / 255`. The tests report
   the maximum difference and how many channels differ, and fail above 1.
 
 ### Measured against the contract (milestone 2)

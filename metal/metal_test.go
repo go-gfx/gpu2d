@@ -31,8 +31,8 @@ func renderer(tb testing.TB, w, h int) *Renderer {
 
 // TestMatchesReference holds the GPU to gpu2d.Rasterize on random scenes over
 // an opaque and a translucent ground. The blend is the reference's integer
-// arithmetic, so the only possible difference is coverage in f32 against
-// f64; the counts are reported and anything past 1 fails.
+// arithmetic and the corner coverage is decided in integers, so the bar is
+// zero differing channels; the counts are reported.
 func TestMatchesReference(t *testing.T) {
 	const w, h, seeds = 64, 48, 300
 	r := renderer(t, w, h)
@@ -74,7 +74,7 @@ func TestMatchesReference(t *testing.T) {
 				if d > worst {
 					worst = d
 				}
-				if d > 1 {
+				if d > 0 {
 					p := i / 4
 					t.Fatalf("opaque=%v seed %d (%d,%d) channel %d: CPU %d, GPU %d", opaque, seed, p%w, p/w, i%4, want[i], got[i])
 				}

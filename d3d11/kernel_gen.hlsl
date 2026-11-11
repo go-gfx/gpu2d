@@ -105,41 +105,119 @@ uint byteAt(uint i) {
   return (((arena[(i >> (2u & 31u))] >> (((((i & 3u)) * 8u)) & 31u))) & 255u);
 }
 
-float3 cornerCenter(int x, int y, Inst s, int rad) {
+int3 cornerCenter(int x, int y, Inst s, int rad) {
   bool left = (x < wgsl_add(s.x, rad));
   bool right = (x >= wgsl_sub(wgsl_add(s.x, s.w), rad));
   bool top = (y < wgsl_add(s.y, rad));
   bool bottom = (y >= wgsl_sub(wgsl_add(s.y, s.h), rad));
   if (((left && top))) {
-    return float3(float(wgsl_add(s.x, rad)), float(wgsl_add(s.y, rad)), 1.0f);
+    return int3(wgsl_add(s.x, rad), wgsl_add(s.y, rad), 1);
   }
   if (((right && top))) {
-    return float3(float(wgsl_sub(wgsl_add(s.x, s.w), rad)), float(wgsl_add(s.y, rad)), 1.0f);
+    return int3(wgsl_sub(wgsl_add(s.x, s.w), rad), wgsl_add(s.y, rad), 1);
   }
   if (((left && bottom))) {
-    return float3(float(wgsl_add(s.x, rad)), float(wgsl_sub(wgsl_add(s.y, s.h), rad)), 1.0f);
+    return int3(wgsl_add(s.x, rad), wgsl_sub(wgsl_add(s.y, s.h), rad), 1);
   }
   if (((right && bottom))) {
-    return float3(float(wgsl_sub(wgsl_add(s.x, s.w), rad)), float(wgsl_sub(wgsl_add(s.y, s.h), rad)), 1.0f);
+    return int3(wgsl_sub(wgsl_add(s.x, s.w), rad), wgsl_sub(wgsl_add(s.y, s.h), rad), 1);
   }
-  return ((float3)(0.0f));
+  return int3(0, 0, 0);
 }
 
-float coverage(int x, int y, Inst s) {
-  int rad = s.radius;
-  precise float3 c = cornerCenter(x, y, s, rad);
-  precise float d = wgsl_length(float2(wgsl_pf(wgsl_pf(float(x) + 0.5f) - c.x), wgsl_pf(wgsl_pf(float(y) + 0.5f) - c.y)));
-  if (((s.kind == 0u))) {
-    if (((c.z == 0.0f))) {
-      return 1.0f;
+uint2 mul64(uint a, uint b) {
+  uint a0 = (a & 65535u);
+  uint a1 = (a >> (16u & 31u));
+  uint b0 = (b & 65535u);
+  uint b1 = (b >> (16u & 31u));
+  uint p00 = (a0 * b0);
+  uint p01 = (a0 * b1);
+  uint p10 = (a1 * b0);
+  uint p11 = (a1 * b1);
+  uint mid = ((((p00 >> (16u & 31u))) + ((p01 & 65535u))) + ((p10 & 65535u)));
+  return uint2((((p00 & 65535u)) | ((mid << (16u & 31u)))), (((p11 + ((p01 >> (16u & 31u)))) + ((p10 >> (16u & 31u)))) + ((mid >> (16u & 31u)))));
+}
+
+bool le64(uint2 a, uint2 b) {
+  return ((a.y < b.y) || (((a.y == b.y) && (a.x <= b.x))));
+}
+
+uint isqrt64(uint2 n, uint est) {
+  uint r = est;
+  { [loop] for (int i = 0; (i < 16); i = wgsl_add(i, 1)) {
+    if (((!le64(mul64(r, r), n)))) {
+      r = (r - 1u);
+    } else if ((le64(mul64((r + 1u), (r + 1u)), n))) {
+      r = (r + 1u);
+    } else {
+      break;
     }
-    return min(max(wgsl_pf(wgsl_pf(float(rad) + 0.5f) - d), 0.0f), 1.0f);
+  } }
+  return r;
+}
+
+uint coverage(int x, int y, Inst s, uint ca) {
+  int rad = s.radius;
+  int3 c = cornerCenter(x, y, s, rad);
+  if (((c.z == 0))) {
+    if (((s.kind == 0u))) {
+      return ca;
+    }
+    bool edge = ((((y == s.y) || (y == wgsl_sub(wgsl_add(s.y, s.h), 1))) || (x == s.x)) || (x == wgsl_sub(wgsl_add(s.x, s.w), 1)));
+    return (edge ? ca : 0u);
   }
-  if ((((rad > 0) && (c.z != 0.0f)))) {
-    return max(wgsl_pf(1.0f - abs(wgsl_pf(d - (wgsl_pf(float(rad) - 0.5f))))), 0.0f);
+  int dx = wgsl_add(wgsl_mul(2, (wgsl_sub(x, c.x))), 1);
+  int dy = wgsl_add(wgsl_mul(2, (wgsl_sub(y, c.y))), 1);
+  uint d4 = asuint(wgsl_add(wgsl_mul(dx, dx), wgsl_mul(dy, dy)));
+  uint m = asuint(wgsl_sub(wgsl_mul(2, rad), 1));
+  uint2 n = mul64((ca * ca), d4);
+  uint fl = isqrt64(n, wgsl_f2u(wgsl_pf(float(ca) * sqrt(float(d4)))));
+  uint2 sq = mul64(fl, fl);
+  bool exact = ((sq.x == n.x) && (sq.y == n.y));
+  if (((s.kind == 0u))) {
+    uint h = asuint(wgsl_add(wgsl_mul(2, rad), 1));
+    if (((d4 >= (h * h)))) {
+      return 0u;
+    }
+    if (((d4 <= (m * m)))) {
+      return ca;
+    }
+    uint t = ((ca * h) + 1u);
+    uint u = fl;
+    if (((!exact))) {
+      u = (u + 1u);
+    }
+    if (((((((t - u)) & 1u)) != 0u))) {
+      u = (u + 1u);
+    }
+    return wgsl_udiv(((t - u)), 2u);
   }
-  bool edge = ((((y == s.y) || (y == wgsl_sub(wgsl_add(s.y, s.h), 1))) || (x == s.x)) || (x == wgsl_sub(wgsl_add(s.x, s.w), 1)));
-  return (edge ? 1.0f : 0.0f);
+  if (((d4 == (m * m)))) {
+    return ca;
+  }
+  if (((d4 >= (((m + 2u)) * ((m + 2u)))))) {
+    return 0u;
+  }
+  if ((((m >= 2u) && (d4 <= (((m - 2u)) * ((m - 2u))))))) {
+    return 0u;
+  }
+  if (((d4 > (m * m)))) {
+    uint t = (((2u * ca) + 1u) + (ca * m));
+    uint u = fl;
+    if (((!exact))) {
+      u = (u + 1u);
+    }
+    if (((((((t - u)) & 1u)) != 0u))) {
+      u = (u + 1u);
+    }
+    return wgsl_udiv(((t - u)), 2u);
+  }
+  int t = wgsl_sub(wgsl_add(wgsl_mul(2, asint(ca)), 1), asint((ca * m)));
+  int u = asint(fl);
+  if ((((((wgsl_sub(u, t)) & 1)) != 0))) {
+    u = wgsl_sub(u, 1);
+  }
+  return asuint(wgsl_div((wgsl_add(u, t)), 2));
 }
 
 uint4 blend(uint4 dst, uint sr, uint sg, uint sb, uint ca) {
@@ -195,14 +273,7 @@ void raster(uint3 gid : SV_DispatchThreadID) {
       d = blend(d, byteAt(o), byteAt((o + 1u)), byteAt((o + 2u)), byteAt((o + 3u)));
       continue;
     }
-    precise float cov = coverage(x, y, s);
-    if (((cov <= 0.0f))) {
-      continue;
-    }
-    if (((cov < 1.0f))) {
-      ca = wgsl_f2u(wgsl_pf(wgsl_pf(float(ca) * cov) + 0.5f));
-    }
-    d = blend(d, sr, sg, sb, ca);
+    d = blend(d, sr, sg, sb, coverage(x, y, s, ca));
   } }
   px[i] = (((d.x | ((d.y << (8u & 31u)))) | ((d.z << (16u & 31u)))) | ((d.w << (24u & 31u))));
 }

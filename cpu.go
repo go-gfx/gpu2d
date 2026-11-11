@@ -100,7 +100,7 @@ func Coverage(k Kind, x, y int, r Rect, rad int) float64 {
 		if !in {
 			return 1
 		}
-		return min(max(float64(rad)+0.5-math.Hypot(float64(x)+0.5-cx, float64(y)+0.5-cy), 0), 1)
+		return min(max(float64(rad)+0.5-cornerDist(x, y, cx, cy), 0), 1)
 	}
 	if rad <= 0 {
 		if y == r.Y || y == r.Y+r.H-1 || x == r.X || x == r.X+r.W-1 {
@@ -109,13 +109,27 @@ func Coverage(k Kind, x, y int, r Rect, rad int) float64 {
 		return 0
 	}
 	if cx, cy, in := cornerCenter(x, y, r, rad); in {
-		d := math.Hypot(float64(x)+0.5-cx, float64(y)+0.5-cy)
+		d := cornerDist(x, y, cx, cy)
 		return max(1-math.Abs(d-(float64(rad)-0.5)), 0)
 	}
 	if y == r.Y || y == r.Y+r.H-1 || x == r.X || x == r.X+r.W-1 {
 		return 1
 	}
 	return 0
+}
+
+// cornerDist is the distance from the centre of pixel (x, y) to the corner
+// circle's centre (cx, cy), an integer point, exactly: the offsets are
+// half-integers, so 4·D is an exact integer, computed in integers; math.Sqrt is
+// correctly rounded and the division by two is exact, so the result is the f64
+// nearest the true distance (go-widgets/painter's cornerDist, the same
+// function). The kernels decide the byte from the integer 4·D directly, which
+// this equals: the true values are at least 1e-8 from a rounding boundary of
+// the byte, far outside f64's error. MaxRadius keeps 4·D inside 32 bits there.
+func cornerDist(x, y int, cx, cy float64) float64 {
+	dx := int64(2*(float64(x)-cx)) + 1
+	dy := int64(2*(float64(y)-cy)) + 1
+	return math.Sqrt(float64(dx*dx+dy*dy)) / 2
 }
 
 // cornerCenter returns the circle centre of the corner box (x, y) lies in.

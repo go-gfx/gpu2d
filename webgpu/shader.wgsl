@@ -1,5 +1,5 @@
 // One quad per gpu2d instance. The fragment shader computes gpu2d.Coverage
-// at the pixel centre, step for step, in f32; fixed-function blending
+// at the pixel centre exactly, in integers; fixed-function blending
 // composites the result in draw order.
 
 struct Inst {
@@ -43,31 +43,107 @@ struct VOut {
 
 // cornerCenter: xy is the circle centre of the corner box (x, y) lies in,
 // z is 1 when it lies in one.
-fn cornerCenter(x: i32, y: i32, s: Inst, rad: i32) -> vec3f {
+fn cornerCenter(x: i32, y: i32, s: Inst, rad: i32) -> vec3<i32> {
   let left = x < s.x + rad;
   let right = x >= s.x + s.w - rad;
   let top = y < s.y + rad;
   let bottom = y >= s.y + s.h - rad;
-  if (left && top) { return vec3f(f32(s.x + rad), f32(s.y + rad), 1.0); }
-  if (right && top) { return vec3f(f32(s.x + s.w - rad), f32(s.y + rad), 1.0); }
-  if (left && bottom) { return vec3f(f32(s.x + rad), f32(s.y + s.h - rad), 1.0); }
-  if (right && bottom) { return vec3f(f32(s.x + s.w - rad), f32(s.y + s.h - rad), 1.0); }
-  return vec3f(0.0);
+  if (left && top) { return vec3<i32>(s.x + rad, s.y + rad, 1); }
+  if (right && top) { return vec3<i32>(s.x + s.w - rad, s.y + rad, 1); }
+  if (left && bottom) { return vec3<i32>(s.x + rad, s.y + s.h - rad, 1); }
+  if (right && bottom) { return vec3<i32>(s.x + s.w - rad, s.y + s.h - rad, 1); }
+  return vec3<i32>(0, 0, 0);
 }
 
-fn coverage(x: i32, y: i32, s: Inst) -> f32 {
+// mul64 is a·b as (low word, high word), from 16-bit halves.
+fn mul64(a: u32, b: u32) -> vec2<u32> {
+  let a0 = a & 65535u;
+  let a1 = a >> 16u;
+  let b0 = b & 65535u;
+  let b1 = b >> 16u;
+  let p00 = a0 * b0;
+  let p01 = a0 * b1;
+  let p10 = a1 * b0;
+  let p11 = a1 * b1;
+  let mid = (p00 >> 16u) + (p01 & 65535u) + (p10 & 65535u);
+  return vec2<u32>((p00 & 65535u) | (mid << 16u), p11 + (p01 >> 16u) + (p10 >> 16u) + (mid >> 16u));
+}
+
+// le64: a <= b for (low, high) pairs.
+fn le64(a: vec2<u32>, b: vec2<u32>) -> bool {
+  return a.y < b.y || (a.y == b.y && a.x <= b.x);
+}
+
+// isqrt64 is floor(sqrt(n)) for n below 2^48, from an estimate that is off by
+// a few at most, corrected with exact products.
+fn isqrt64(n: vec2<u32>, est: u32) -> u32 {
+  var r = est;
+  for (var i = 0; i < 16; i++) {
+    if (!le64(mul64(r, r), n)) {
+      r = r - 1u;
+    } else if (le64(mul64(r + 1u, r + 1u), n)) {
+      r = r + 1u;
+    } else {
+      break;
+    }
+  }
+  return r;
+}
+
+// coverage is the alpha a primitive of instance s paints at pixel (x, y) with
+// colour alpha ca: floor(ca·cov + 0.5) for the corner coverage cov, which is
+// ca itself where cov >= 1 and 0 where cov <= 0 (a no-op in blend).
+//
+// The coverage is the exact one. The offsets from the pixel centre to the
+// corner circle's centre are half-integers, so d4 = 4·D = dx² + dy² is an exact
+// integer, and with S = sqrt(d4), d = S/2:
+//   fill:    cov = (2·rad + 1 - S) / 2
+//   outline: cov = 1 - |S - (2·rad - 1)| / 2
+// both of which are decided here in integers, with no rounded value: the byte is
+// the largest k with 2k <= T -+ ca·S, found from floor(sqrt(ca²·d4)) and its
+// exact squares. Equal to the f64 reference (gpu2d.Coverage) on every device,
+// whatever its sqrt, rounding mode or fused multiply-add. Valid for rad up to
+// 16383 (gpu2d.MaxRadius), where d4 < 2^31.
+fn coverage(x: i32, y: i32, s: Inst, ca: u32) -> u32 {
   let rad = s.radius;
   let c = cornerCenter(x, y, s, rad);
-  let d = length(vec2f(f32(x) + 0.5 - c.x, f32(y) + 0.5 - c.y));
+  if (c.z == 0) {
+    if (s.kind == 0u) { return ca; }
+    let edge = y == s.y || y == s.y + s.h - 1 || x == s.x || x == s.x + s.w - 1;
+    return select(0u, ca, edge);
+  }
+  let dx = 2 * (x - c.x) + 1;
+  let dy = 2 * (y - c.y) + 1;
+  let d4 = u32(dx * dx + dy * dy);
+  let m = u32(2 * rad - 1);
+  let n = mul64(ca * ca, d4);
+  let fl = isqrt64(n, u32(f32(ca) * sqrt(f32(d4))));
+  let sq = mul64(fl, fl);
+  let exact = sq.x == n.x && sq.y == n.y;
   if (s.kind == 0u) {
-    if (c.z == 0.0) { return 1.0; }
-    return clamp(f32(rad) + 0.5 - d, 0.0, 1.0);
+    let h = u32(2 * rad + 1);
+    if (d4 >= h * h) { return 0u; }
+    if (d4 <= m * m) { return ca; }
+    let t = ca * h + 1u;
+    var u = fl;
+    if (!exact) { u = u + 1u; }
+    if (((t - u) & 1u) != 0u) { u = u + 1u; }
+    return (t - u) / 2u;
   }
-  if (rad > 0 && c.z != 0.0) {
-    return max(1.0 - abs(d - (f32(rad) - 0.5)), 0.0);
+  if (d4 == m * m) { return ca; }
+  if (d4 >= (m + 2u) * (m + 2u)) { return 0u; }
+  if (m >= 2u && d4 <= (m - 2u) * (m - 2u)) { return 0u; }
+  if (d4 > m * m) {
+    let t = 2u * ca + 1u + ca * m;
+    var u = fl;
+    if (!exact) { u = u + 1u; }
+    if (((t - u) & 1u) != 0u) { u = u + 1u; }
+    return (t - u) / 2u;
   }
-  let edge = y == s.y || y == s.y + s.h - 1 || x == s.x || x == s.x + s.w - 1;
-  return select(0.0, 1.0, edge);
+  let t = 2 * i32(ca) + 1 - i32(ca * m);
+  var u = i32(fl);
+  if (((u - t) & 1) != 0) { u = u - 1; }
+  return u32((u + t) / 2);
 }
 
 @fragment fn fs(v: VOut) -> @location(0) vec4f {
@@ -95,10 +171,7 @@ fn coverage(x: i32, y: i32, s: Inst) -> f32 {
     if (t.a == 0.0) { discard; }
     return t / 255.0;
   }
-  let cov = coverage(x, y, s);
-  if (cov <= 0.0) { discard; }
-  var a = s.color >> 24u;
-  if (cov < 1.0) { a = u32(f32(a) * cov + 0.5); }
+  let a = coverage(x, y, s, s.color >> 24u);
   if (a == 0u) { discard; }
   return vec4f(rgb, f32(a)) / 255.0;
 }
