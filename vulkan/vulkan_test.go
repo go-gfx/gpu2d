@@ -179,6 +179,43 @@ func TestBreakCheckPerturbedBlend(t *testing.T) {
 	}
 }
 
+// TestBreakCheckPerturbedCorner proves the corner-heavy parity can fail: the
+// kernel's fill coverage rounded the other way (+ 2 for + 1, which moves the
+// byte by one where a pixel is antialiased) must be caught by TestCornerHeavy's
+// scenes, and by the random ones, which now reach radius 64.
+func TestBreakCheckPerturbedCorner(t *testing.T) {
+	const old = "let t = ca * h + 1u;"
+	if strings.Count(gpu2d.KernelWGSL, old) != 1 {
+		t.Fatal("kernel.wgsl no longer has the coverage line this check perturbs")
+	}
+	bad := strings.Replace(gpu2d.KernelWGSL, old, "let t = ca * h + 2u;", 1)
+	plain, err := spirvgen.Kernel(bad, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rte, err := spirvgen.Kernel(bad, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func(k struct{ plain, rte []byte }) { kernels = k }(kernels)
+	kernels = struct{ plain, rte []byte }{plain, rte}
+	r := rendererRTE(t, 64, 48, false)
+	tl := newTally()
+	for seed := range uint64(10) {
+		w, h := 200, 200
+		if err := r.Resize(w, h); err != nil {
+			t.Fatal(err)
+		}
+		l, _ := gpu2d.NewList(w, h)
+		scenes.Corners(l, seed, 64)
+		tl.compare(t, r, l, ground(w, h, seed%2 == 0), "seed")
+	}
+	t.Logf("perturbed corner: max |Δ| %d, %d channels differ", tl.worst, tl.differing)
+	if tl.differing == 0 {
+		t.Fatal("a perturbed corner coverage still matched the reference: TestCornerHeavy proves nothing")
+	}
+}
+
 // TestBreakCheckWrongBuffer binds the pixels' descriptor to a decoy: the
 // reference result must not appear in Pixels, and the decoy must be drawn on.
 func TestBreakCheckWrongBuffer(t *testing.T) {

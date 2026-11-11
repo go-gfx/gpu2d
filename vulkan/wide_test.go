@@ -19,8 +19,8 @@ import (
 
 // Two parity runs wider than TestMatchesReference, for a device whose sqrt is
 // not correctly rounded (RADV's is 1 ULP off on 18 % of its inputs, measured
-// in go-gfx/wgsl's vulkantest), where the question is whether the f32 coverage
-// still lands on the reference's byte.
+// in go-gfx/wgsl's vulkantest): the kernel's corner coverage is integer
+// arithmetic and must not care.
 //
 //	VULKAN_WIDE_SCENES=N   TestMatchesReferenceWide: N random scenes, each of a
 //	                       random size from 16 x 16 up to 3840 x 2160
@@ -28,12 +28,8 @@ import (
 //	                       radii 1..64 at every position modulo the tile
 //
 // Unset, TestMatchesReferenceWide is skipped and TestCornerHeavy runs 60
-// scenes with radii 1..13, the range in which the f32 kernel is exactly the
-// reference (TestF32CornerCoverageDivergence enumerates why it stops at 14).
-// Both fail on a single differing channel and say where: the kind and radius
-// of the topmost instance over each differing pixel. With VULKAN_WIDE_CORNERS
-// set, TestCornerHeavy fails on every device with f32 coverage: that is the
-// finding recorded in docs/NATIVE.md, kept runnable.
+// scenes. Both fail on a single differing channel and say where: the kind and
+// radius of the topmost instance over each differing pixel.
 
 // cell is what a differing pixel is attributed to: the topmost instance that
 // covers it, in draw order.
@@ -166,41 +162,13 @@ func TestMatchesReferenceWide(t *testing.T) {
 	tl.report(t, "random scenes, wide")
 }
 
-// cornerScene records rounded rectangles whose radii run 1..maxRad over
-// positions of every phase modulo the tile (16) and of the pixel, with fills
-// and outlines, opaque and translucent.
-func cornerScene(l *gpu2d.List, seed uint64, maxRad int) {
-	w, h := l.Size()
-	r := rand.New(rand.NewPCG(seed, 0xc0ffee))
-	for i := range 160 {
-		rad := 1 + (i+int(seed))%maxRad
-		rw := 2*rad + r.IntN(40)
-		rh := 2*rad + r.IntN(40)
-		if r.IntN(8) == 0 { // a radius past half a side: clamps
-			rw, rh = 1+r.IntN(2*rad), 1+r.IntN(2*rad)
-		}
-		rc := gpu2d.Rect{X: r.IntN(w+16) - 8, Y: r.IntN(h+16) - 8, W: rw, H: rh}
-		a := uint8(255)
-		if r.IntN(3) != 0 {
-			a = uint8(1 + r.IntN(255))
-		}
-		c := gpu2d.RGBA{R: uint8(r.IntN(256)), G: uint8(r.IntN(256)), B: uint8(r.IntN(256)), A: a}
-		if r.IntN(2) == 0 {
-			l.FillRoundRect(rc, rad, c)
-		} else {
-			l.StrokeRoundRect(rc, rad, c, 1+r.IntN(4))
-		}
-	}
-}
-
-// TestCornerHeavy stresses length() near the pixel-coverage thresholds: a
-// device whose sqrt is 1 ULP off may land a coverage on the other side of a
-// rounding boundary, and a pixel on a corner arc is where that shows.
+// TestCornerHeavy draws rounded rectangles and outlines of radii 1 to 64 at
+// every position modulo the tile (scenes.Corners): the corner coverage is
+// decided in integers by the kernel and must be the reference's on every
+// device, whatever its sqrt. 60 scenes by default, VULKAN_WIDE_CORNERS=N for
+// more.
 func TestCornerHeavy(t *testing.T) {
-	n, maxRad := envInt(t, "VULKAN_WIDE_CORNERS", 0), 64
-	if n == 0 {
-		n, maxRad = 60, 13
-	}
+	n, maxRad := envInt(t, "VULKAN_WIDE_CORNERS", 60), 64
 	r := rendererRTE(t, 64, 48, false)
 	tl := newTally()
 	for seed := range uint64(n) {
@@ -210,7 +178,7 @@ func TestCornerHeavy(t *testing.T) {
 			t.Fatal(err)
 		}
 		l, _ := gpu2d.NewList(w, h)
-		cornerScene(l, seed, maxRad)
+		scenes.Corners(l, seed, maxRad)
 		tl.compare(t, r, l, ground(w, h, seed%2 == 0), fmt.Sprintf("seed %d", seed))
 	}
 	tl.report(t, fmt.Sprintf("corner-heavy rounded rects, radii 1..%d", maxRad))

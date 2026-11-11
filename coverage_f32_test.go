@@ -5,253 +5,202 @@
 package gpu2d
 
 import (
-	"fmt"
 	"math"
 	"testing"
 )
 
-// The kernel computes a corner's coverage in f32 and the reference in f64, so
-// a byte can differ where the f64 coverage times the alpha lands within f32's
-// error of a rounding boundary. These tests enumerate that domain without a
-// GPU: the coverage of a corner pixel depends on nothing but (kind, radius,
-// the pixel's offset in the corner box, the colour's alpha), so every case up
-// to radius 64 is checked, and the kernel is mirrored operation by operation
-// in float32 (Go rounds each float32 operation, and the explicit conversions
-// below forbid fusing a multiply into an add).
-//
-// Three evaluations are compared with Coverage's byte:
-//
-//	kernel      kernel.wgsl in f32 with a correctly rounded sqrt (lavapipe's)
-//	kernel+ulp  the same with sqrt off by one ULP on about one input in five,
-//	            which is what spirv/vulkantest measures on RADV
-//	ds          the corrector proposed in docs/NATIVE.md: the squared distance
-//	            exactly in integers, sqrt refined by one Newton step whose
-//	            residual is computed exactly (error-free transformations, no
-//	            FMA), the coverage and its product with the alpha in
-//	            double-single, so the result does not depend on the sqrt's
-//	            rounding; with the same perturbed sqrt.
+// The corner coverage is one mathematical definition: with D the exact squared
+// distance from the pixel centre to the corner circle's centre, a fill covers
+// clamp(rad + 0.5 - sqrt(D), 0, 1) and an outline ring max(1 - |sqrt(D) -
+// (rad - 0.5)|, 0). The offsets are half-integers, so 4·D is an exact integer.
+// The CPU reference takes math.Sqrt of it (Coverage). The kernels decide the
+// byte floor(alpha·cov + 0.5) from the integer alone, with no rounded value
+// (kernel.wgsl, `coverage`); coverageAlpha below is that function, operation
+// for operation on 32-bit words, and the tests hold it to Coverage over the
+// whole domain a corner pixel can have: (kind, radius, offset in the corner
+// box, alpha). The kernels themselves are held to Rasterize on every device by
+// the back-ends' tests.
 
-type f32 = float32
-
-// twoSum is Knuth's error-free addition: s + e == a + b exactly.
-func twoSum(a, b f32) (s, e f32) {
-	s = f32(a + b)
-	bb := f32(s - a)
-	e = f32(f32(a-f32(s-bb)) + f32(b-bb))
-	return
+// mul64 is a·b as (low, high) words, from 16-bit halves.
+func mul64(a, b uint32) (lo, hi uint32) {
+	a0, a1 := a&65535, a>>16
+	b0, b1 := b&65535, b>>16
+	p00, p01, p10, p11 := a0*b0, a0*b1, a1*b0, a1*b1
+	mid := (p00 >> 16) + (p01 & 65535) + (p10 & 65535)
+	return (p00 & 65535) | (mid << 16), p11 + (p01 >> 16) + (p10 >> 16) + (mid >> 16)
 }
 
-// split is Veltkamp's: a == hi + lo, each with at most 12 significant bits.
-func split(a f32) (hi, lo f32) {
-	c := f32(4097 * a)
-	hi = f32(c - f32(c-a))
-	lo = f32(a - hi)
-	return
-}
+func le64(alo, ahi, blo, bhi uint32) bool { return ahi < bhi || (ahi == bhi && alo <= blo) }
 
-// twoProd is Dekker's error-free product: p + e == a * b exactly.
-func twoProd(a, b f32) (p, e f32) {
-	p = f32(a * b)
-	ah, al := split(a)
-	bh, bl := split(b)
-	e = f32(f32(f32(f32(ah*bh)-p)+f32(ah*bl)+f32(al*bh)) + f32(al*bl))
-	return
-}
-
-// perturb returns s moved by one ULP on about one input in five, by a hash of
-// the input, as a sqrt that is not correctly rounded would.
-func perturb(in, s f32) f32 {
-	h := math.Float32bits(in) * 2654435761
-	switch h >> 29 {
-	case 0:
-		return math.Nextafter32(s, float32(math.Inf(1)))
-	case 1:
-		return math.Nextafter32(s, 0)
-	}
-	return s
-}
-
-// refByte is the reference: the alpha the CPU blends with, or -1 for a pixel
-// it skips (coverage <= 0). It is Coverage's own arithmetic.
-func refByte(kind Kind, rad, i, j int, a uint8) int {
-	r := Rect{X: 0, Y: 0, W: 2 * rad, H: 2 * rad}
-	cov := Coverage(kind, i, j, r, rad)
-	if cov <= 0 {
-		return -1
-	}
-	if cov < 1 {
-		return int(uint8(float64(a)*cov + 0.5))
-	}
-	return int(a)
-}
-
-// kernelByte is kernel.wgsl's coverage and alpha in f32. sqrt is the sqrt
-// under test.
-func kernelByte(kind Kind, rad, i, j int, a uint8, sqrt func(f32) f32) int {
-	dx, dy := f32(i)+0.5-f32(rad), f32(j)+0.5-f32(rad)
-	d := sqrt(f32(f32(dx*dx) + f32(dy*dy)))
-	var cov f32
-	if kind == KindFill {
-		cov = f32(f32(rad)+0.5) - d
-		cov = min(max(cov, 0), 1)
-	} else {
-		cov = max(1-f32(abs32(f32(d-f32(f32(rad)-0.5)))), 0)
-	}
-	if cov <= 0 {
-		return -1
-	}
-	if cov < 1 {
-		return int(uint32(f32(f32(f32(a)*cov) + 0.5)))
-	}
-	return int(a)
-}
-
-func abs32(x f32) f32 { return f32(math.Abs(float64(x))) }
-
-// dsByte is the proposed corrector. D = 4(dx² + dy²) is an integer, exact in
-// f32 for radii up to 1448 (checked by the caller); d = sqrt(D) / 2.
-func dsByte(kind Kind, rad, i, j int, a uint8, sqrt func(f32) f32) int {
-	ui, uj := f32(2*i+1-2*rad), f32(2*j+1-2*rad)
-	dd := f32(f32(ui*ui) + f32(uj*uj)) // exact: an integer below 2^24
-	s0 := sqrt(dd)                     // within a few ULP of sqrt(dd), however rounded
-	// residual dd - s0² exactly: s0² = ph + pl, dd - ph is exact (they are
-	// within a factor 2^-12 of each other), then minus pl.
-	ph, pl := twoProd(s0, s0)
-	res := f32(f32(dd-ph) - pl)
-	c := f32(res / f32(2*s0)) // sqrt(dd) = s0 + c to ~2^-48 relative; dd > 0 always
-	// d = (s0 + c) / 2, in double-single: halves are exact.
-	dh, dl := f32(s0*0.5), f32(c*0.5)
-	// e = d - t, t a half-integer-valued f32 (rad + 0.5 or rad - 0.5).
-	sub := func(t f32) (hi, lo f32) {
-		h, l := twoSum(dh, -t)
-		l = f32(l + dl)
-		return twoSum(h, l) // renormalised; |l| << |h| except at cancellation
-	}
-	var chi, clo f32 // coverage = chi + clo
-	if kind == KindFill {
-		h, l := sub(f32(rad) + 0.5)
-		chi, clo = -h, -l // rad + 0.5 - d
-	} else {
-		h, l := sub(f32(rad) - 0.5)
-		if h < 0 || (h == 0 && l < 0) {
-			h, l = -h, -l
+// isqrt64 mirrors the kernel's: the estimate is corrected with exact products.
+func isqrt64(nlo, nhi, est uint32) uint32 {
+	r := est
+	for range 16 {
+		lo, hi := mul64(r, r)
+		if !le64(lo, hi, nlo, nhi) {
+			r--
+			continue
 		}
-		// 1 - |e|
-		s, e := twoSum(1, -h)
-		chi, clo = twoSum(s, f32(e-l))
+		lo, hi = mul64(r+1, r+1)
+		if le64(lo, hi, nlo, nhi) {
+			r++
+			continue
+		}
+		break
 	}
-	// clamp and classify exactly on (chi, clo)
-	if chi < 0 || (chi == 0 && clo <= 0) {
-		return -1
+	return r
+}
+
+// coverageAlpha mirrors kernel.wgsl's coverage for a pixel in a corner box:
+// i, j are the pixel's offsets in the box (0..rad-1), the circle's centre at
+// (rad, rad); the estimate of the root is f32 with an arbitrary error
+// (errEst moves it), which the exact corrections must absorb.
+func coverageAlpha(kind Kind, rad, i, j int, ca uint32, errEst int) uint32 {
+	dx := int32(2*(i-rad) + 1)
+	dy := int32(2*(j-rad) + 1)
+	d4 := uint32(dx*dx + dy*dy)
+	m := uint32(2*rad - 1)
+	nlo, nhi := mul64(ca*ca, d4)
+	est := uint32(max(int(float32(ca)*float32(math.Sqrt(float64(float32(d4)))))+errEst, 0)) // u32(f32) is never negative
+	fl := isqrt64(nlo, nhi, est)
+	sqlo, sqhi := mul64(fl, fl)
+	exact := sqlo == nlo && sqhi == nhi
+	if kind == KindFill {
+		h := uint32(2*rad + 1)
+		if d4 >= h*h {
+			return 0
+		}
+		if d4 <= m*m {
+			return ca
+		}
+		t := ca*h + 1
+		u := fl
+		if !exact {
+			u++
+		}
+		if (t-u)&1 != 0 {
+			u++
+		}
+		return (t - u) / 2
 	}
-	if chi > 1 || (chi == 1 && clo >= 0) {
-		return int(a)
+	if d4 == m*m {
+		return ca
 	}
-	// floor(a * cov + 0.5): a * chi exactly as ph + pl, plus a * clo
-	p, pe := twoProd(f32(a), chi)
-	s, se := twoSum(p, 0.5)
-	frac := f32(f32(se+pe) + f32(f32(a)*clo)) // tiny, exact enough
-	k := f32(f32(math.Floor(float64(s))))
-	rem := f32(f32(s-k) + frac)
+	if d4 >= (m+2)*(m+2) {
+		return 0
+	}
+	if m >= 2 && d4 <= (m-2)*(m-2) {
+		return 0
+	}
+	if d4 > m*m {
+		t := 2*ca + 1 + ca*m
+		u := fl
+		if !exact {
+			u++
+		}
+		if (t-u)&1 != 0 {
+			u++
+		}
+		return (t - u) / 2
+	}
+	t := 2*int32(ca) + 1 - int32(ca*m)
+	u := int32(fl)
+	if (u-t)&1 != 0 {
+		u--
+	}
+	return uint32((u + t) / 2)
+}
+
+// referenceAlpha is what Rasterize paints: the alpha floor(a·cov + 0.5) of
+// Coverage, or a for cov >= 1; 0 where it paints nothing.
+func referenceAlpha(kind Kind, rad, i, j int, a uint8) uint32 {
+	cov := Coverage(kind, i, j, Rect{W: 2 * rad, H: 2 * rad}, rad)
 	switch {
-	case rem >= 1:
-		k++
-	case rem < 0:
-		k--
+	case cov <= 0:
+		return 0
+	case cov < 1:
+		return uint32(uint8(float64(a)*cov + 0.5))
 	}
-	return int(uint32(k))
+	return uint32(a)
 }
 
-func hardSqrt(x f32) f32 { return f32(math.Sqrt(float64(x))) }
-func ulpSqrt(x f32) f32  { return perturb(x, hardSqrt(x)) }
-
-// TestF32CornerCoverageDivergence enumerates every corner pixel of every
-// radius 1..64 for both kinds and every alpha 1..255, then radii up to 1024
-// at six alphas, and counts the bytes that differ from the reference. It logs
-// the counts and asserts only what is proved: the double-single corrector has
-// none, with an exact or a perturbed sqrt, and the plain f32 kernel is
-// affected (so the finding stays visible).
-func TestF32CornerCoverageDivergence(t *testing.T) {
-	if raceEnabled {
-		t.Skip("665 million evaluations: not under the race detector")
+// oldAlpha is the reference as it was before cornerDist: math.Hypot.
+func oldAlpha(kind Kind, rad, i, j int, a uint8) uint32 {
+	d := math.Hypot(float64(i)+0.5-float64(rad), float64(j)+0.5-float64(rad))
+	var cov float64
+	if kind == KindFill {
+		cov = min(max(float64(rad)+0.5-d, 0), 1)
+	} else {
+		cov = max(1-math.Abs(d-(float64(rad)-0.5)), 0)
 	}
-	type counts struct{ cases, kernel, ulp, ds, dsUlp int }
-	var total counts
-	byRad := map[int]*counts{}
-	firstDS := ""
-	run := func(rad int, alphas []uint8) {
-		c := byRad[rad]
-		if c == nil {
-			c = &counts{}
-			byRad[rad] = c
+	switch {
+	case cov <= 0:
+		return 0
+	case cov < 1:
+		return uint32(uint8(float64(a)*cov + 0.5))
+	}
+	return uint32(a)
+}
+
+// TestKernelCoverageIsTheReference: the integer algorithm equals Coverage on
+// every corner pixel of every radius 1..64 with every alpha, and on a sample of
+// radii up to MaxRadius; and it is indifferent to the sqrt estimate it starts
+// from (off by up to 3 either way, far more than any device's sqrt). It logs
+// how many bytes the old math.Hypot reference painted differently.
+func TestKernelCoverageIsTheReference(t *testing.T) {
+	if raceEnabled {
+		t.Skip("hundreds of millions of evaluations: not under the race detector")
+	}
+	cases, hypotOff := 0, 0
+	check := func(rad, i, j int, a uint8, kind Kind) {
+		want := referenceAlpha(kind, rad, i, j, a)
+		for _, e := range []int{0, 3, -3} {
+			if got := coverageAlpha(kind, rad, i, j, uint32(a), e); got != want {
+				t.Fatalf("kind %d radius %d pixel (%d,%d) alpha %d, estimate off by %d: kernel %d, reference %d", kind, rad, i, j, a, e, got, want)
+			}
 		}
-		for _, kind := range []Kind{KindFill, KindOutline} {
+		if oldAlpha(kind, rad, i, j, a) != want {
+			hypotOff++
+		}
+		cases++
+	}
+	for _, kind := range []Kind{KindFill, KindOutline} {
+		for rad := 1; rad <= 64; rad++ {
 			for j := range rad {
 				for i := range rad {
-					for _, a := range alphas {
-						want := refByte(kind, rad, i, j, a)
-						c.cases++
-						if kernelByte(kind, rad, i, j, a, hardSqrt) != want {
-							c.kernel++
-						}
-						if kernelByte(kind, rad, i, j, a, ulpSqrt) != want {
-							c.ulp++
-						}
-						if g := dsByte(kind, rad, i, j, a, hardSqrt); g != want {
-							c.ds++
-							if firstDS == "" {
-								firstDS = fmt.Sprint("kind/rad/i/j/a/want/got: ", int(kind), rad, i, j, a, want, g)
-							}
-						}
-						if g := dsByte(kind, rad, i, j, a, ulpSqrt); g != want {
-							c.dsUlp++
-						}
+					for a := 1; a <= 255; a++ {
+						check(rad, i, j, uint8(a), kind)
+					}
+				}
+			}
+		}
+		if testing.Short() {
+			continue
+		}
+		for _, rad := range []int{65, 100, 255, 256, 1000, 1448, 1449, 4095, 4096, 10000, 16382, MaxRadius} {
+			for j := 0; j < rad; j += 1 + rad/300 {
+				for i := range rad {
+					for _, a := range []uint8{1, 2, 64, 127, 128, 200, 254, 255} {
+						check(rad, i, j, a, kind)
 					}
 				}
 			}
 		}
 	}
-	all := make([]uint8, 255)
-	for k := range all {
-		all[k] = uint8(k + 1)
+	t.Logf("%d cases: kernel algorithm == reference on all; the math.Hypot reference differed from it on %d (%.6f%%)",
+		cases, hypotOff, 100*float64(hypotOff)/float64(cases))
+}
+
+// A radius past MaxRadius is refused, not drawn wrongly: 4·D would pass 32 bits.
+func TestRadiusPastMaxRadiusIsRefused(t *testing.T) {
+	l, _ := NewList(40000, 40000)
+	l.FillRoundRect(Rect{W: 40000, H: 40000}, MaxRadius+1, RGBA{A: 255})
+	if len(l.Instances()) != 0 || l.Err() != ErrTooLarge {
+		t.Fatalf("%d instances, Err %v", len(l.Instances()), l.Err())
 	}
-	for rad := 1; rad <= 64; rad++ {
-		run(rad, all)
-	}
-	if !testing.Short() {
-		for rad := 65; rad <= 1024; rad += 7 {
-			run(rad, []uint8{1, 64, 127, 128, 200, 255})
-		}
-	}
-	first, last := 0, 0
-	for rad := 1; rad <= 1024; rad++ {
-		c := byRad[rad]
-		if c == nil {
-			continue
-		}
-		total.cases += c.cases
-		total.kernel += c.kernel
-		total.ulp += c.ulp
-		total.ds += c.ds
-		total.dsUlp += c.dsUlp
-		if c.kernel > 0 && first == 0 {
-			first = rad
-		}
-		if c.kernel > 0 {
-			last = rad
-		}
-	}
-	t.Logf("%d cases: f32 kernel differs on %d, with a 1-ULP sqrt on %d; double-single corrector differs on %d (exact sqrt), %d (1-ULP sqrt)",
-		total.cases, total.kernel, total.ulp, total.ds, total.dsUlp)
-	t.Logf("the f32 kernel first differs at radius %d (last seen %d)", first, last)
-	for _, rad := range []int{1, 8, 13, 16, 24, 32, 40, 48, 56, 64} {
-		c := byRad[rad]
-		t.Logf("radius %2d: %8d cases, kernel %4d, kernel+ulp %4d, ds %d, ds+ulp %d", rad, c.cases, c.kernel, c.ulp, c.ds, c.dsUlp)
-	}
-	if total.ds != 0 || total.dsUlp != 0 {
-		t.Errorf("the corrector differs from the reference (%s)", firstDS)
-	}
-	if total.kernel == 0 {
-		t.Error("the f32 kernel never differs: the test no longer shows the divergence it documents")
+	l.Reset()
+	l.FillRoundRect(Rect{W: 40000, H: 40000}, MaxRadius, RGBA{A: 255})
+	if len(l.Instances()) != 1 || l.Err() != nil {
+		t.Fatalf("a radius of MaxRadius: %d instances, Err %v", len(l.Instances()), l.Err())
 	}
 }
