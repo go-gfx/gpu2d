@@ -170,7 +170,7 @@ jobs:
         with:
           go-version-file: go.mod
       - uses: actions/setup-node@v5
-        with: { node-version: 22 }
+        with: { node-version: 26 }
       - name: Playwright driver and Chromium
         shell: bash
         run: |
