@@ -5,9 +5,9 @@ go 1.27.3
 replace github.com/go-gfx/gpu2d => ../..
 
 require (
-	github.com/chromedp/chromedp v0.21.1
-	github.com/go-gfx/gpu2d v0.0.0
-	github.com/go-gfx/webgpu v0.15.0
+	github.com/chromedp/chromedp v0.23.0
+	github.com/go-gfx/gpu2d v0.12.1
+	github.com/go-gfx/webgpu v0.18.0
 )
 
 require (
