@@ -189,9 +189,12 @@ func scene(s surface, seed uint64, n, w, h int) {
 		p := vector.NewPath().MoveTo(float64(coord(w))+r.Float64(), float64(coord(h))+r.Float64())
 		for range 2 + r.IntN(4) {
 			x, y := float64(coord(w))+r.Float64(), float64(coord(h))+r.Float64()
-			if r.IntN(3) == 0 {
+			switch r.IntN(4) {
+			case 0:
 				p.QuadTo(float64(coord(w)), float64(coord(h)), x, y)
-			} else {
+			case 1: // cubics too, so the harness's OpCubic shift runs
+				p.CubicTo(float64(coord(w)), float64(coord(h)), float64(coord(w)), float64(coord(h)), x, y)
+			default:
 				p.LineTo(x, y)
 			}
 		}

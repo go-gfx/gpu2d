@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-gfx/gpu2d"
+	vk "github.com/go-gfx/vulkan"
 )
 
 // A download that fails leaves the stage stale. The stage must then never be
@@ -53,6 +54,38 @@ func TestFailedDownloadIsNeverUploadedOverTheDeviceFrame(t *testing.T) {
 	}
 	if err := r.Draw(red); err != nil {
 		t.Fatalf("Draw after a successful Sync: %v", err)
+	}
+}
+
+// A Copy that fails after Begin must not leave the command buffer recording:
+// the next Sync would get ErrInvalid from Begin for good.
+func TestFailedRecordingDoesNotStickTheDownload(t *testing.T) {
+	const w, h = 40, 24
+	r := renderer(t, w, h)
+	green, _ := gpu2d.NewList(w, h)
+	green.FillRect(gpu2d.Rect{W: w, H: h}, gpu2d.RGBA{G: 255, A: 255})
+	if err := r.Draw(green); err != nil {
+		t.Fatal(err)
+	}
+	// Make Copy fail after Begin and Barrier succeeded: a stage smaller than
+	// the target is ErrInvalid.
+	good := r.stage
+	small, err := r.dev.NewBuffer(4, vk.UsageStorage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer small.Close()
+	r.stage = small
+	if err := r.Sync(); err == nil {
+		t.Fatal("Sync with a too small stage succeeded")
+	}
+	// Repair the stage: the buffer must not be stuck recording.
+	r.stage = good
+	if err := r.Sync(); err != nil {
+		t.Fatalf("Sync after a failed recording: %v", err)
+	}
+	if p := r.Pixels(); p[1] != 255 || p[4*(w*h-1)+1] != 255 {
+		t.Fatalf("the downloaded frame is wrong: % x", p[:4])
 	}
 }
 
