@@ -1,10 +1,10 @@
 github.com/chromedp/cdproto v0.159.0 h1:wepTaKq5AGTwIxXh6h5bESQcvcfnSb2ItnFChA62/b8=
 github.com/chromedp/cdproto v0.159.0/go.mod h1:h68JaIuFr9o3yiayxEYhBdvaxgYO3shDrPSYhNlyfu0=
-github.com/chromedp/chromedp v0.21.1 h1:5mwUk5QIyzYiyDQ6FQWJ+kCFLy4XMaxEMKPng8WTI/c=
-github.com/chromedp/chromedp v0.21.1/go.mod h1:hJcPsoPrgxu4ulIXhO1WmtKjosCD8jbZh0+TeVFsod8=
-github.com/go-gfx/webgpu v0.15.0 h1:YqEOflkk9ej8KFYJvO4gMTpw9c9FtqmKLLP5joRDG2Y=
-github.com/go-gfx/webgpu v0.15.0/go.mod h1:doIaanN3TQ5QUSTUXDvSOrUYIdyAAfNmqCSDio2JTuo=
-github.com/go-gfx/wgsl v0.6.1 h1:QJ867lr9vqW13Frpc7bYDujXHzG7hrbfvkyXjGHYl24=
-github.com/go-gfx/wgsl v0.6.1/go.mod h1:Fzzw0jXvB+zxCqmTDwvcu3B7PkIVJBcygl2dyDyDAgQ=
+github.com/chromedp/chromedp v0.23.0 h1:iNGzFz+exVgG4OynS2CnYzlAjHiOFW++fUPbbmSwy0w=
+github.com/chromedp/chromedp v0.23.0/go.mod h1:hJcPsoPrgxu4ulIXhO1WmtKjosCD8jbZh0+TeVFsod8=
+github.com/go-gfx/webgpu v0.18.0 h1:ssy+m7sW/GTrCEPZ1BSmGUdfyy7PzjSBpGaYqMm8s5M=
+github.com/go-gfx/webgpu v0.18.0/go.mod h1:tU9/yMt35RGyu9T/TdnIEANPs4Z1PCRJymZ1Jt94Ego=
+github.com/go-gfx/wgsl v0.9.0 h1:6luCFFUwJOPpdkLYGnUOMl2Por2YTb/0bDLdJdpaFtw=
+github.com/go-gfx/wgsl v0.9.0/go.mod h1:Fzzw0jXvB+zxCqmTDwvcu3B7PkIVJBcygl2dyDyDAgQ=
 github.com/go-json-experiment/json v0.0.0-20260213210345-44df1a37e875 h1:XGPtjxqp0FS8jj1Z7QGcSOSgyq1fUPjNyJXvi3KfI4A=
 github.com/go-json-experiment/json v0.0.0-20260213210345-44df1a37e875/go.mod h1:uNVvRXArCGbZ508SxYYTC5v1JWoz2voff5pm25jU1Ok=
