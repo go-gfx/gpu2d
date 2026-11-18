@@ -1,13 +1,13 @@
 module github.com/go-gfx/gpu2d/internal/presentbench
 
-go 1.27.3
+go 1.27.4
 
 replace github.com/go-gfx/gpu2d => ../..
 
 require (
-	github.com/chromedp/chromedp v0.23.1
+	github.com/chromedp/chromedp v0.24.0
 	github.com/go-gfx/gpu2d v0.12.1
-	github.com/go-gfx/webgpu v0.18.0
+	github.com/go-gfx/webgpu v0.19.1
 )
 
 require (
