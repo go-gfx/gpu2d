@@ -1,4 +1,8 @@
-github.com/go-gfx/gfx v0.41.0 h1:MVEnory0Zx8ypzuVDrTIWz4Cekv8hn5ilcYg3glJPrk=
-github.com/go-gfx/gfx v0.41.0/go.mod h1:4OenoKrgdht6UXYf5SV8w2tb41hfAdy4QoxJRPsRDz4=
-github.com/go-widgets/painter v0.17.1 h1:inOmnCGSiHd4oZx7Zm7PJRDWWSEopnEnvDKEeFu9iT0=
-github.com/go-widgets/painter v0.17.1/go.mod h1:8kERcZUoWNyLIas1NsMWiYynvvyx+hcB2cNIh0Bx0yc=
+github.com/go-gfx/gfx v0.42.0 h1:6z6RlJTJrfcnJTzd/T2yZ+fAKcs6356GYq9xw1YC0hg=
+github.com/go-gfx/gfx v0.42.0/go.mod h1:nSDWko+TjrKBWz0uu4rPWLjKcv2q2kgHOEMao6fzPKU=
+github.com/go-simd/boxfilter v0.2.0 h1:K9+z/6Axd70hZNA8bxdx9g5egKAzHxJqJiMDYkBffyk=
+github.com/go-simd/boxfilter v0.2.0/go.mod h1:7qVmCWNCFD0PXzlGE52CKE/aUCmihojhB1HRbIqbxX0=
+github.com/go-widgets/painter v0.22.0 h1:/W6/j34gwqYXYzkS8H98gVYKZ3MsZOb25on1LHxJy6c=
+github.com/go-widgets/painter v0.22.0/go.mod h1:uwNd4vsDklrWHtRaq+/Y65/qlw6FWfhXtlWvke1fulw=
+golang.org/x/sys v0.50.0 h1:dkKZEFTEKaLr1sjhs0WiKqoi8Jj5nHbS3Njmx1UoMJs=
+golang.org/x/sys v0.50.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
